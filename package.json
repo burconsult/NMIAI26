@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "acceptance:gates": "npx tsx tools/tripletex_acceptance_gates.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.66",

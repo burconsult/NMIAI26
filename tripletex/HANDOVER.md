@@ -113,6 +113,10 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
   - Executor handles wrapped response formats (`value`, `values`) in `primaryValue()`.
   - Planner prompt and validator enforce challenge API tips:
     - `fields`, `count`, `from` query usage for efficient GET/list calls
+    - required date-range params are auto-injected when missing:
+      - `/ledger/posting` + `/ledger/voucher`: `dateFrom`, `dateTo`
+      - `/order`: `orderDateFrom`, `orderDateTo`
+      - `/invoice`: `invoiceDateFrom`, `invoiceDateTo`
     - `DELETE` requires `/{id}` path
     - `POST`/`PUT` requires JSON body
     - list wrappers (`fullResultSize`, `values`) are expected
@@ -151,6 +155,8 @@ Common event names:
 - `tripletex.request`
 - `tripletex.response`
 - `tripletex.network_error`
+- `planner.plan_step_retry_on_validation`
+- `planner.plan_step_retry_success`
 - `solve.completed`
 - `solve.completed_fail_soft`
 - `solve.failed`
@@ -194,6 +200,8 @@ Execution guard behavior:
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (default `25000`)
 - `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`; used when ledger list calls omit date range)
 - `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`; used when ledger list calls omit date range)
+- `TRIPLETEX_ENTITY_DATE_FROM` (optional, default `2000-01-01`; used when order/invoice list calls omit date range)
+- `TRIPLETEX_ENTITY_DATE_TO` (optional, default `2100-12-31`; used when order/invoice list calls omit date range)
 - `TRIPLETEX_DRY_RUN` (`1|true|yes` to skip mutating calls)
 - `TRIPLETEX_DEBUG_ERRORS` (`1` to include verbose details in 500 responses)
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
@@ -229,6 +237,13 @@ curl http://127.0.0.1:3000/health
 curl -X POST http://127.0.0.1:3000/solve -H "content-type: application/json" -d @tripletex/sample_request.json
 ```
 
+Acceptance gates:
+
+```bash
+npm run typecheck
+npx tsx tools/tripletex_acceptance_gates.ts
+```
+
 ## 6. Repo Split Plan (Dedicated Tripletex Repo)
 
 Copy these paths to the new repo:
@@ -258,6 +273,7 @@ Priority 1:
 1. Expand deterministic fallback coverage for complex create flows (`/order`, `/invoice`, `/ledger/voucher`) when LLM path is unavailable.
 2. Add real PDF/image extraction pipeline (OCR/PDF parser).
 3. Add structured execution traces for debugging leaderboard regressions.
+3. Improve `/ledger/voucher` create/delete handling strategy for sandboxes where manual voucher posting is restricted.
 
 Priority 2:
 

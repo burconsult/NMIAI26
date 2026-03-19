@@ -19,6 +19,8 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `25000`)
 - `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`)
 - `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`)
+- `TRIPLETEX_ENTITY_DATE_FROM` (optional, default `2000-01-01`; used for `/order` + `/invoice` list reads)
+- `TRIPLETEX_ENTITY_DATE_TO` (optional, default `2100-12-31`; used for `/order` + `/invoice` list reads)
 - `TRIPLETEX_DRY_RUN` (optional; `1|true|yes`)
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
 - `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
@@ -68,3 +70,10 @@ When registering your challenge endpoint:
 2. If you set `TRIPLETEX_API_KEY`, use the same value in challenge submission API-key field.
    - accepted inbound headers: `Authorization: Bearer <key>`, `Authorization: ApiKey <key>`, raw `Authorization`, or `x-api-key`.
 3. Run one sandbox test before live submission loop.
+
+## Acceptance Gate Before Deploy
+
+```bash
+npm run typecheck
+npx tsx tools/tripletex_acceptance_gates.ts
+```
