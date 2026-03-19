@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { executePlan, validatePlanForPrompt } from "../api/_lib/planner.ts";
+import { executePlan, heuristicPlan, validatePlanForPrompt } from "../api/_lib/planner.ts";
 import { TripletexClient } from "../api/_lib/tripletex.ts";
 import type { ExecutionPlan } from "../api/_lib/schemas.ts";
 
@@ -159,6 +159,24 @@ async function runGates(): Promise<void> {
       };
       const issues = validatePlanForPrompt("Create department", plan);
       assert(issues.some((issue) => issue.includes("repeated identical mutating steps")), `missing expected issue: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "validatePlanForPrompt rejects out-of-scope mutating entity",
+    run: () => {
+      const plan: ExecutionPlan = {
+        summary: "customer request but invoice mutation",
+        steps: [
+          { method: "GET", path: "/customer", params: { count: 1 } },
+          { method: "POST", path: "/invoice", body: { customer: { id: 1 }, invoiceDate: "2026-03-19", invoiceDueDate: "2026-03-19" } },
+        ],
+      };
+      const issues = validatePlanForPrompt("Create customer Acme AS", plan);
+      assert(
+        issues.some((issue) => issue.includes("outside prompt scope")),
+        `missing expected out-of-scope issue: ${issues.join(" | ")}`,
+      );
     },
   });
 
@@ -449,6 +467,108 @@ async function runGates(): Promise<void> {
       } finally {
         globalThis.fetch = originalFetch;
       }
+    },
+  });
+
+  gates.push({
+    name: "executePlan removes unknown mapping fields on 422 and retries",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "POST" && path === "/invoice") {
+          const invoiceBody = body as Record<string, unknown>;
+          if (invoiceBody?.sendType || invoiceBody?.sendTypeEmail) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [
+                { code: 16000, field: "sendTypeEmail", message: "Cannot map field 'sendTypeEmail'." },
+                { code: 16000, field: "sendType", message: "Cannot map field 'sendType'." },
+              ],
+            });
+          }
+          return jsonResponse(201, { value: { id: 991 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "remove unknown mapping fields",
+          steps: [
+            {
+              method: "POST",
+              path: "/invoice",
+              body: {
+                customer: { id: 1 },
+                invoiceDate: "2026-03-19",
+                invoiceDueDate: "2026-03-19",
+                orders: [{ id: 100 }],
+                sendTypeEmail: true,
+                sendType: "EMAIL",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const invoicePosts = calls.filter((call) => call.method === "POST" && call.path === "/invoice");
+        assert.equal(invoicePosts.length, 2, "expected initial POST /invoice + repaired retry POST /invoice");
+        const firstBody = invoicePosts[0]?.body as Record<string, unknown>;
+        const secondBody = invoicePosts[1]?.body as Record<string, unknown>;
+        assert(firstBody?.sendTypeEmail !== undefined, "initial body should include unsupported field");
+        assert(firstBody?.sendType !== undefined, "initial body should include unsupported field");
+        assert.equal(secondBody?.sendTypeEmail, undefined, "retry body must remove sendTypeEmail");
+        assert.equal(secondBody?.sendType, undefined, "retry body must remove sendType");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "heuristic fallback produces valid order create flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Create order for customer ACME",
+        files: [],
+        tripletex_credentials: {
+          base_url: "https://example.test/v2",
+          session_token: "token",
+        },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order in heuristic plan");
+      const issues = validatePlanForPrompt("Create order for customer ACME", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic fallback produces valid invoice create flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Create invoice for customer ACME",
+        files: [],
+        tripletex_credentials: {
+          base_url: "https://example.test/v2",
+          session_token: "token",
+        },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/invoice"), "expected POST /invoice in heuristic plan");
+      const issues = validatePlanForPrompt("Create invoice for customer ACME", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
     },
   });
 

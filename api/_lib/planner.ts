@@ -42,6 +42,7 @@ export type PlannerTraceEvent = {
   responseShape?: unknown;
   error?: string;
   retryFields?: string[];
+  removedFields?: string[];
 };
 
 type PlannerTrace = (event: PlannerTraceEvent) => void;
@@ -329,6 +330,20 @@ const ENTITY_KEYWORDS: Array<{ entity: NormalizedEntity; keywords: string[] }> =
   },
 ];
 
+const ENTITY_PREREQUISITES: Record<NormalizedEntity, NormalizedEntity[]> = {
+  employee: [],
+  customer: [],
+  department: [],
+  project: ["customer", "employee"],
+  invoice: ["customer", "order", "product"],
+  order: ["customer", "product"],
+  product: [],
+  travelExpense: ["employee"],
+  ledger_account: [],
+  ledger_posting: ["ledger_account"],
+  ledger_voucher: ["ledger_account"],
+};
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -498,6 +513,20 @@ function planTouchesRequestedEntities(
   return false;
 }
 
+function allowedEntitiesForRequest(requestedEntities: Set<NormalizedEntity>): Set<NormalizedEntity> {
+  const allowed = new Set<NormalizedEntity>();
+  const stack = [...requestedEntities];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || allowed.has(current)) continue;
+    allowed.add(current);
+    for (const prerequisite of ENTITY_PREREQUISITES[current] ?? []) {
+      if (!allowed.has(prerequisite)) stack.push(prerequisite);
+    }
+  }
+  return allowed;
+}
+
 function hasRepeatedIdenticalMutations(plan: ExecutionPlan): boolean {
   let previousMutation: { method: AllowedMethod; path: string; bodyFingerprint: string } | null = null;
   for (const step of plan.steps) {
@@ -528,6 +557,7 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
   const readIntent = isReadIntent(lower) && !createIntent && !deleteIntent && !updateIntent;
 
   const requestedEntities = requestedEntitiesFromPrompt(lower);
+  const allowedEntities = allowedEntitiesForRequest(requestedEntities);
   const planEntities = new Set<NormalizedEntity>();
   for (const step of plan.steps) {
     const entity = entityFromPath(step.path);
@@ -553,6 +583,13 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
     }
     if ((contract.idPathRequiredFor ?? []).includes(step.method as AllowedMethod) && !pathHasIdSegment(step.path, contract.basePath)) {
       issues.push(`step ${stepNumber}: ${step.method} must target an ID path like ${contract.basePath}/{id}`);
+    }
+    if (requestedEntities.size > 0 && step.method !== "GET" && !allowedEntities.has(contract.entity)) {
+      const requestedList = [...requestedEntities].join(", ");
+      const allowedList = [...allowedEntities].join(", ");
+      issues.push(
+        `step ${stepNumber}: mutating '${contract.entity}' is outside prompt scope (requested: ${requestedList}; allowed incl. prerequisites: ${allowedList})`,
+      );
     }
     const stepParams = toRecord(step.params);
     if (
@@ -692,7 +729,14 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) && createIntent) {
+  if (
+    (lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) &&
+    createIntent &&
+    !lower.includes("order") &&
+    !lower.includes("ordre") &&
+    !lower.includes("invoice") &&
+    !lower.includes("faktura")
+  ) {
     const customerName = quoted ?? capitalized ?? `Generated Customer ${Date.now().toString().slice(-6)}`;
     return {
       summary: "Heuristic customer create flow",
@@ -712,7 +756,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent) {
+  if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent && !lower.includes("travel expense") && !lower.includes("reise")) {
     const person = splitPersonName(quoted ?? capitalized);
     return {
       summary: "Heuristic employee create flow",
@@ -912,6 +956,105 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
           body: { name: projectName },
           saveAs: "project",
           reason: "Create project from prompt fields",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("order") || lower.includes("ordre")) && createIntent) {
+    return {
+      summary: "Heuristic order create flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/customer",
+          params: { count: 1, fields: "id" },
+          saveAs: "customer",
+          reason: "Find one customer for order creation",
+        },
+        {
+          method: "GET",
+          path: "/product",
+          params: { count: 1, fields: "id" },
+          saveAs: "product",
+          reason: "Find one product for order creation",
+        },
+        {
+          method: "POST",
+          path: "/order",
+          body: {
+            customer: { id: "{{customer_id}}" },
+            product: { id: "{{product_id}}" },
+            orderDate: todayIsoDate(),
+            deliveryDate: todayIsoDate(),
+          },
+          saveAs: "order",
+          reason: "Create order with linked customer and product",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("invoice") || lower.includes("faktura")) && createIntent) {
+    return {
+      summary: "Heuristic invoice create flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/customer",
+          params: { count: 1, fields: "id" },
+          saveAs: "customer",
+          reason: "Find one customer for invoice creation",
+        },
+        {
+          method: "GET",
+          path: "/order",
+          params: {
+            count: 1,
+            fields: "id",
+            orderDateFrom: defaultEntityDateFrom(),
+            orderDateTo: defaultEntityDateTo(),
+          },
+          saveAs: "order",
+          reason: "Find one order to invoice",
+        },
+        {
+          method: "POST",
+          path: "/invoice",
+          body: {
+            customer: { id: "{{customer_id}}" },
+            invoiceDate: todayIsoDate(),
+            invoiceDueDate: todayIsoDate(),
+            orders: [{ id: "{{order_id}}" }],
+          },
+          saveAs: "invoice",
+          reason: "Create invoice linked to customer and order",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("travel expense") || lower.includes("reise")) && createIntent) {
+    return {
+      summary: "Heuristic travel expense create flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/employee",
+          params: { count: 1, fields: "id" },
+          saveAs: "employee",
+          reason: "Find one employee for travel expense",
+        },
+        {
+          method: "POST",
+          path: "/travelExpense",
+          body: {
+            employee: { id: "{{employee_id}}" },
+            date: todayIsoDate(),
+            description: quoted ?? "Generated travel expense",
+          },
+          saveAs: "travelExpense",
+          reason: "Create travel expense for employee",
         },
       ],
     };
@@ -1393,6 +1536,123 @@ function validationFieldsFromError(error: unknown): string[] {
   return [...new Set(fields)];
 }
 
+function unknownMappingFieldsFromError(error: unknown): string[] {
+  if (!(error instanceof TripletexError)) return [];
+  if (error.statusCode !== 422) return [];
+  const body = error.responseBody as Record<string, unknown> | undefined;
+  const validationMessages = Array.isArray(body?.validationMessages) ? body.validationMessages : [];
+  const fields: string[] = [];
+  for (const item of validationMessages) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const code = String(row.code ?? row.errorCode ?? "").trim();
+    const messageRaw = typeof row.message === "string" ? row.message : "";
+    const message = messageRaw.toLowerCase();
+    const field = typeof row.field === "string" ? row.field.trim() : "";
+    const mappingError =
+      code === "16000" ||
+      message.includes("cannot map") ||
+      message.includes("can not map") ||
+      message.includes("kan ikke mappe") ||
+      message.includes("unknown field") ||
+      message.includes("ukjent felt") ||
+      message.includes("does not exist") ||
+      message.includes("finnes ikke");
+    if (!mappingError) continue;
+    if (field) fields.push(field);
+    const quotedMatches = [...messageRaw.matchAll(/['"`]([a-zA-Z][a-zA-Z0-9_.[\]]{1,80})['"`]/g)];
+    for (const match of quotedMatches) {
+      const token = match[1]?.trim();
+      if (token) fields.push(token);
+    }
+    const namedMatches = [
+      messageRaw.match(/\bfield\s+([a-zA-Z][a-zA-Z0-9_.[\]]{1,80})/i),
+      messageRaw.match(/\bfelt\s+([a-zA-Z][a-zA-Z0-9_.[\]]{1,80})/i),
+      messageRaw.match(/\bparameter\s+([a-zA-Z][a-zA-Z0-9_.[\]]{1,80})/i),
+      messageRaw.match(/\bproperty\s+([a-zA-Z][a-zA-Z0-9_.[\]]{1,80})/i),
+    ];
+    for (const match of namedMatches) {
+      const token = match?.[1]?.trim();
+      if (token) fields.push(token);
+    }
+  }
+  return [...new Set(fields)];
+}
+
+function cloneForPatch<T>(value: T): T {
+  if (value === undefined) return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
+function fieldPathToSegments(path: string): Array<string | number> {
+  return path
+    .replace(/\[(\d+)]/g, ".$1")
+    .split(".")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+}
+
+function deletePath(target: unknown, segments: Array<string | number>): boolean {
+  if (segments.length === 0 || !target || typeof target !== "object") return false;
+  const [head, ...tail] = segments;
+  if (tail.length === 0) {
+    if (Array.isArray(target) && typeof head === "number" && head >= 0 && head < target.length) {
+      target.splice(head, 1);
+      return true;
+    }
+    if (!Array.isArray(target) && typeof head === "string" && Object.prototype.hasOwnProperty.call(target, head)) {
+      delete (target as Record<string, unknown>)[head];
+      return true;
+    }
+    return false;
+  }
+
+  if (Array.isArray(target)) {
+    if (typeof head !== "number" || head < 0 || head >= target.length) return false;
+    return deletePath(target[head], tail);
+  }
+  if (typeof head !== "string") return false;
+  return deletePath((target as Record<string, unknown>)[head], tail);
+}
+
+function withUnknownFieldRemovals(
+  method: AllowedMethod,
+  body: unknown,
+  rawFields: string[],
+): { body: unknown; changed: boolean; removedFields: string[] } {
+  if (method !== "POST" && method !== "PUT") return { body, changed: false, removedFields: [] };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { body, changed: false, removedFields: [] };
+  const fieldCandidates = [...new Set(rawFields.map((field) => field.trim()).filter(Boolean))];
+  if (fieldCandidates.length === 0) return { body, changed: false, removedFields: [] };
+
+  const next = cloneForPatch(body) as Record<string, unknown>;
+  const removedFields: string[] = [];
+  let changed = false;
+
+  for (const field of fieldCandidates) {
+    const cleaned = field.replace(/\s+/g, "");
+    const removedByPath = deletePath(next, fieldPathToSegments(cleaned));
+    if (removedByPath) {
+      changed = true;
+      removedFields.push(field);
+      continue;
+    }
+    const root = cleaned.replace(/\[(\d+)]/g, ".$1").split(".")[0] ?? cleaned;
+    if (root && Object.prototype.hasOwnProperty.call(next, root)) {
+      delete next[root];
+      changed = true;
+      removedFields.push(root);
+    }
+  }
+
+  return changed ? { body: next, changed: true, removedFields: [...new Set(removedFields)] } : { body, changed: false, removedFields: [] };
+}
+
 function missingTemplateVarFromError(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   const match = message.match(/Template variable '([^']+)' not found/);
@@ -1832,17 +2092,21 @@ export async function executePlan(
         });
       } catch (error) {
         const retryFields = validationFieldsFromError(error);
+        const mappingFields = unknownMappingFieldsFromError(error);
         if (retryFields.length > 0) {
           await enrichVarsForValidationRetry(client, vars, path, retryFields);
         }
-        const repaired = withValidationFieldDefaults(step.method, path, body, vars, retryFields);
-        if (!repaired.changed || retryFields.length === 0) throw error;
+        const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
+        const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
+        const shouldRetry = sanitized.changed || repaired.changed;
+        if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
         trace?.({
           event: "plan_step_retry_on_validation",
           step: count,
           method: step.method,
           path,
           retryFields,
+          removedFields: sanitized.removedFields,
           error: error instanceof Error ? error.message : String(error),
         });
         body = repaired.body;
@@ -1856,6 +2120,7 @@ export async function executePlan(
           method: step.method,
           path,
           retryFields,
+          removedFields: sanitized.removedFields,
         });
       }
     }
