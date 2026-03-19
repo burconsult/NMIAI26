@@ -37,6 +37,15 @@ Optional Google Document AI extraction (recommended for PDFs/images):
 - `DOC_AI_PROCESSOR_VERSION` (optional)
 - `DOC_AI_MAX_FILES` (optional, default `3`)
 - `DOC_AI_MAX_BYTES_PER_FILE` (optional, default `10485760`)
+- `DOC_AI_CREDENTIALS_JSON` (recommended on Vercel; full service-account JSON)
+
+Your current OCR processor values:
+
+```bash
+DOC_AI_PROJECT_ID=662554800959
+DOC_AI_LOCATION=europe-west2
+DOC_AI_PROCESSOR_ID=b5bffbdeb4c0ebc7
+```
 
 ## Endpoint Mapping
 

@@ -17,6 +17,10 @@ type DocAiConfig = {
   processorVersion?: string;
   maxFiles: number;
   maxBytesPerFile: number;
+  credentials?: {
+    client_email: string;
+    private_key: string;
+  };
 };
 
 const DOC_AI_MIME_TYPES = new Set([
@@ -42,8 +46,36 @@ function toText(buf: Buffer, maxChars: number): string {
   return normalized.slice(0, maxChars);
 }
 
+function parseDocAiCredentials(): {
+  client_email: string;
+  private_key: string;
+  project_id?: string;
+} | null {
+  const raw =
+    process.env.DOC_AI_CREDENTIALS_JSON?.trim() ||
+    process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON?.trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const clientEmail = parsed.client_email;
+    const privateKey = parsed.private_key;
+    const projectId = parsed.project_id;
+    if (typeof clientEmail !== "string" || typeof privateKey !== "string") {
+      return null;
+    }
+    return {
+      client_email: clientEmail,
+      private_key: privateKey,
+      project_id: typeof projectId === "string" ? projectId : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getDocAiConfig(): DocAiConfig | null {
-  const projectId = process.env.DOC_AI_PROJECT_ID?.trim();
+  const parsedCredentials = parseDocAiCredentials();
+  const projectId = process.env.DOC_AI_PROJECT_ID?.trim() || parsedCredentials?.project_id;
   const location = process.env.DOC_AI_LOCATION?.trim();
   const processorId = process.env.DOC_AI_PROCESSOR_ID?.trim();
   if (!projectId || !location || !processorId) return null;
@@ -54,6 +86,12 @@ function getDocAiConfig(): DocAiConfig | null {
     processorVersion: process.env.DOC_AI_PROCESSOR_VERSION?.trim() || undefined,
     maxFiles: Math.max(1, Number(process.env.DOC_AI_MAX_FILES || "3")),
     maxBytesPerFile: Math.max(1024, Number(process.env.DOC_AI_MAX_BYTES_PER_FILE || `${10 * 1024 * 1024}`)),
+    credentials: parsedCredentials
+      ? {
+          client_email: parsedCredentials.client_email,
+          private_key: parsedCredentials.private_key,
+        }
+      : undefined,
   };
 }
 
@@ -104,6 +142,8 @@ export async function summarizeAttachments(
   const docAiClient = canUseDocAi
     ? new DocumentProcessorServiceClient({
         apiEndpoint: `${config.location}-documentai.googleapis.com`,
+        projectId: config.projectId,
+        credentials: config.credentials,
       })
     : null;
   const processorName = canUseDocAi && docAiClient ? buildProcessorName(docAiClient, config) : null;
@@ -167,4 +207,3 @@ export async function summarizeAttachments(
 
   return summaries;
 }
-

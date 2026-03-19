@@ -110,6 +110,7 @@ Optional Document AI extraction:
 - `DOC_AI_PROCESSOR_VERSION` (optional)
 - `DOC_AI_MAX_FILES` (optional)
 - `DOC_AI_MAX_BYTES_PER_FILE` (optional)
+- `DOC_AI_CREDENTIALS_JSON` (service-account JSON blob, preferred for Vercel)
 
 ## 5. Local Development
 
