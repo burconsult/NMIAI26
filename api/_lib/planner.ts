@@ -163,6 +163,17 @@ function isReadIntent(lower: string): boolean {
 }
 
 function isUpdateIntent(lower: string): boolean {
+  const explicitReadOnlyNegations = [
+    "do not modify",
+    "without modifying",
+    "read-only",
+    "read only",
+    "no changes",
+    "ikke endre",
+    "uten å endre",
+    "kun les",
+  ];
+  if (explicitReadOnlyNegations.some((token) => lower.includes(token))) return false;
   return [
     "update",
     "oppdater",
