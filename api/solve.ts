@@ -42,13 +42,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "25000"),
   });
   const dryRun = ["1", "true", "yes"].includes((process.env.TRIPLETEX_DRY_RUN || "").toLowerCase());
-  const attachments = summarizeAttachments(payload.files);
+  const attachments = await summarizeAttachments(payload.files);
 
   const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
+  const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
   let previousError = "";
   let usedPlanner = "heuristic";
   try {
-    if (process.env.OPENAI_API_KEY?.trim()) {
+    if (!llmDisabled) {
       for (let i = 0; i < maxAttempts; i += 1) {
         try {
           const plan = await llmPlan(payload, attachments, previousError || undefined);

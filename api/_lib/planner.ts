@@ -1,16 +1,10 @@
 import { generateObject } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
+import { gateway } from "@ai-sdk/gateway";
 
+import type { AttachmentSummary } from "./attachments.js";
 import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas.js";
 import { executionPlanSchema } from "./schemas.js";
 import { dig, primaryValue, TripletexClient } from "./tripletex.js";
-
-type AttachmentSummary = {
-  filename: string;
-  mimeType: string;
-  sizeBytes: number;
-  textExcerpt: string;
-};
 
 export class SolveError extends Error {
   constructor(message: string) {
@@ -185,7 +179,38 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     }
   }
 
-  throw new SolveError("No heuristic plan found; set OPENAI_API_KEY for LLM planning.");
+  throw new SolveError("No heuristic plan found; configure AI Gateway to enable LLM planning.");
+}
+
+function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): string {
+  const lower = prompt.toLowerCase();
+  const hasDocAttachment = summaries.some(
+    (item) =>
+      item.mimeType.toLowerCase() === "application/pdf" ||
+      item.mimeType.toLowerCase().startsWith("image/"),
+  );
+  const complexAccountingTask = [
+    "reconcile",
+    "reconciliation",
+    "ledger",
+    "voucher",
+    "year-end",
+    "bank statement",
+    "årsoppgjør",
+    "hovedbok",
+    "avstemming",
+  ].some((token) => lower.includes(token));
+
+  if (hasDocAttachment && complexAccountingTask) {
+    return process.env.TRIPLETEX_MODEL_DOC_COMPLEX?.trim() || "google/gemini-2.5-pro";
+  }
+  if (hasDocAttachment) {
+    return process.env.TRIPLETEX_MODEL_DOC_FAST?.trim() || "google/gemini-2.5-flash";
+  }
+  if (complexAccountingTask) {
+    return process.env.TRIPLETEX_MODEL_REASONING?.trim() || "anthropic/claude-sonnet-4.5";
+  }
+  return process.env.TRIPLETEX_MODEL_DEFAULT?.trim() || "openai/gpt-4.1-mini";
 }
 
 function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary[], previousError?: string): string {
@@ -193,7 +218,7 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     ? summaries
         .map((file) => {
           const excerpt = file.textExcerpt ? `; excerpt=${file.textExcerpt}` : "";
-          return `- ${file.filename} (${file.mimeType}, ${file.sizeBytes} bytes${excerpt})`;
+          return `- ${file.filename} (${file.mimeType}, ${file.sizeBytes} bytes; source=${file.extractionSource}${excerpt})`;
         })
         .join("\n")
     : "- none";
@@ -217,17 +242,9 @@ export async function llmPlan(
   summaries: AttachmentSummary[],
   previousError?: string,
 ): Promise<ExecutionPlan> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) throw new SolveError("OPENAI_API_KEY is not configured.");
-
-  const provider = createOpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
-  });
-
-  const modelName = process.env.TRIPLETEX_LLM_MODEL?.trim() || "gpt-4.1-mini";
+  const modelName = selectPlanningModel(payload.prompt, summaries);
   const { object } = await generateObject({
-    model: provider(modelName),
+    model: gateway(modelName),
     schema: executionPlanSchema,
     temperature: 0,
     prompt: buildPlanningPrompt(payload, summaries, previousError),
@@ -264,7 +281,7 @@ export async function executePlan(client: TripletexClient, plan: ExecutionPlan, 
         vars[`${step.saveAs}_id`] = (primary as Record<string, unknown>).id;
       }
     }
-    for (const [name, sourcePath] of Object.entries(step.extract ?? {})) {
+    for (const [name, sourcePath] of Object.entries(step.extract ?? {}) as Array<[string, string]>) {
       const extracted = dig(response, sourcePath);
       if (extracted !== undefined) vars[name] = extracted;
     }

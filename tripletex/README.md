@@ -6,7 +6,9 @@ This folder contains the Tripletex challenge implementation and handover package
 
 - `POST /solve` Vercel function in `api/solve.ts`
 - `GET /health` Vercel function in `api/health.ts`
-- `Vercel AI SDK` planner (`ai` + `@ai-sdk/openai`) in `api/_lib/planner.ts`
+- `Vercel AI SDK` planner (`ai` + `@ai-sdk/gateway`) in `api/_lib/planner.ts`
+- Task-aware model routing (OpenAI/Anthropic/Google model IDs via AI Gateway)
+- Optional Google Document AI extraction for PDF/image attachments
 - Tripletex API execution engine in `api/_lib/tripletex.ts`
 - Optional `Bearer` API-key protection via `TRIPLETEX_API_KEY`
 - Vercel rewrites `/solve` and `/health` configured in `vercel.json`

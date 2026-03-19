@@ -13,14 +13,29 @@ This project uses Vercel serverless functions:
 
 ## Required Vercel Environment Variables
 
-- `OPENAI_API_KEY` (required for Vercel AI SDK planning)
-- `TRIPLETEX_LLM_MODEL` (optional, default `gpt-4.1-mini`)
-- `OPENAI_BASE_URL` (optional, for OpenAI-compatible base URL)
+- `AI_GATEWAY_API_KEY` (required outside Vercel runtime; on Vercel the gateway can also use OIDC)
 - `TRIPLETEX_API_KEY` (optional but recommended)
 - `TRIPLETEX_LLM_ATTEMPTS` (optional, default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `25000`)
 - `TRIPLETEX_DRY_RUN` (optional; `1|true|yes`)
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
+- `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
+
+Model routing (all optional):
+
+- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-4.1-mini`)
+- `TRIPLETEX_MODEL_REASONING` (default `anthropic/claude-sonnet-4.5`)
+- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
+- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `google/gemini-2.5-pro`)
+
+Optional Google Document AI extraction (recommended for PDFs/images):
+
+- `DOC_AI_PROJECT_ID`
+- `DOC_AI_LOCATION` (for example `eu` or `us`)
+- `DOC_AI_PROCESSOR_ID`
+- `DOC_AI_PROCESSOR_VERSION` (optional)
+- `DOC_AI_MAX_FILES` (optional, default `3`)
+- `DOC_AI_MAX_BYTES_PER_FILE` (optional, default `10485760`)
 
 ## Endpoint Mapping
 

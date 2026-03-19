@@ -11,8 +11,12 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
   - `GET /health` (rewrite to `api/health.ts`)
 - Planner:
   - `generateObject()` from `ai`
-  - model provider from `@ai-sdk/openai`
+  - model provider from `@ai-sdk/gateway`
   - schema-constrained plan output (Zod)
+- Task-aware model routing:
+  - default planning -> OpenAI
+  - document-heavy planning -> Google
+  - complex reasoning -> Anthropic
 - Executor:
   - Runs plan steps against Tripletex API
   - Supports variable interpolation in paths/body (`{{customer_id}}`, `{{entity.field}}`)
@@ -38,6 +42,7 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
   - request + plan schemas
 - `api/_lib/attachments.ts`
   - attachment summarization for planner context
+  - optional Google Document AI extraction for PDFs/images
 - `api/_lib/planner.ts`
   - Vercel AI SDK planning and execution engine
   - interpolation/extraction helpers
@@ -81,17 +86,29 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
 
 ### Required for LLM planner
 
-- `OPENAI_API_KEY`
+- `AI_GATEWAY_API_KEY` (or Vercel OIDC auth in Vercel runtime)
 
 ### Optional planner/runtime controls
 
-- `OPENAI_BASE_URL` (default OpenAI API base)
-- `TRIPLETEX_LLM_MODEL` (default `gpt-4.1-mini`)
+- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-4.1-mini`)
+- `TRIPLETEX_MODEL_REASONING` (default `anthropic/claude-sonnet-4.5`)
+- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
+- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `google/gemini-2.5-pro`)
 - `TRIPLETEX_LLM_ATTEMPTS` (default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (default `25000`)
 - `TRIPLETEX_DRY_RUN` (`1|true|yes` to skip mutating calls)
 - `TRIPLETEX_DEBUG_ERRORS` (`1` to include verbose details in 500 responses)
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
+- `TRIPLETEX_LLM_DISABLED` (`1` to bypass LLM path)
+
+Optional Document AI extraction:
+
+- `DOC_AI_PROJECT_ID`
+- `DOC_AI_LOCATION`
+- `DOC_AI_PROCESSOR_ID`
+- `DOC_AI_PROCESSOR_VERSION` (optional)
+- `DOC_AI_MAX_FILES` (optional)
+- `DOC_AI_MAX_BYTES_PER_FILE` (optional)
 
 ## 5. Local Development
 
@@ -159,4 +176,3 @@ When failures increase:
 3. If planner issue: tighten planning prompt/schema or add pre/post checks.
 4. If endpoint-specific issue: add deterministic heuristic for that task family.
 5. Deploy preview, run sandbox validation, then update submission endpoint.
-
