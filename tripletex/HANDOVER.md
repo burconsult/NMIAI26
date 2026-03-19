@@ -98,8 +98,13 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
   - Executor uses Basic Auth exactly as `username=0`, `password=session_token` in `api/_lib/tripletex.ts`.
 - Proxy usage:
   - All Tripletex calls are built from request `tripletex_credentials.base_url`; no hardcoded Tripletex host.
-- Optional Bearer protection:
-  - `TRIPLETEX_API_KEY` enables `Authorization: Bearer <key>` validation in `api/solve.ts`.
+- Optional API-key protection:
+  - `TRIPLETEX_API_KEY` enables API-key validation in `api/solve.ts`.
+  - accepted headers:
+    - `Authorization: Bearer <key>`
+    - `Authorization: ApiKey <key>`
+    - `Authorization: <key>`
+    - `x-api-key: <key>`
 - Timeout budget:
   - `maxDuration: 300` in `api/solve.ts` and `vercel.json`.
 - Success contract:
@@ -187,6 +192,8 @@ Execution guard behavior:
 - `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated model IDs)
 - `TRIPLETEX_LLM_ATTEMPTS` (default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (default `25000`)
+- `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`; used when ledger list calls omit date range)
+- `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`; used when ledger list calls omit date range)
 - `TRIPLETEX_DRY_RUN` (`1|true|yes` to skip mutating calls)
 - `TRIPLETEX_DEBUG_ERRORS` (`1` to include verbose details in 500 responses)
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
@@ -267,6 +274,7 @@ Priority 3:
 
 - Missing/invalid bearer token when `TRIPLETEX_API_KEY` is set:
   - returns `401 {"error":"Unauthorized"}`
+  - accepted formats: `Authorization` (`Bearer`, `ApiKey`, raw token) or `x-api-key`
 - Non-POST request to `/solve`:
   - returns `405 {"error":"Method not allowed"}`
 - Payload key variants:

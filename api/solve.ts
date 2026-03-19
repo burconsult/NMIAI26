@@ -187,10 +187,30 @@ function formatAttemptError(error: unknown): string {
 function validateApiKey(req: VercelRequest): boolean {
   const expected = process.env.TRIPLETEX_API_KEY?.trim();
   if (!expected) return true;
-  const header = req.headers.authorization || "";
-  if (!header.startsWith("Bearer ")) return false;
-  const token = header.slice("Bearer ".length).trim();
-  return token === expected;
+  const candidates: string[] = [];
+
+  const authorization = String(req.headers.authorization || "").trim();
+  if (authorization) {
+    if (authorization.startsWith("Bearer ")) {
+      candidates.push(authorization.slice("Bearer ".length).trim());
+    } else if (authorization.startsWith("ApiKey ")) {
+      candidates.push(authorization.slice("ApiKey ".length).trim());
+    } else {
+      // Some clients send the raw key without a scheme.
+      candidates.push(authorization);
+    }
+  }
+
+  const xApiKey = req.headers["x-api-key"];
+  if (typeof xApiKey === "string") {
+    candidates.push(xApiKey.trim());
+  } else if (Array.isArray(xApiKey)) {
+    for (const value of xApiKey) {
+      if (typeof value === "string") candidates.push(value.trim());
+    }
+  }
+
+  return candidates.some((candidate) => candidate === expected);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {

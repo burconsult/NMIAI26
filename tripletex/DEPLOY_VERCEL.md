@@ -17,6 +17,8 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_API_KEY` (optional but recommended)
 - `TRIPLETEX_LLM_ATTEMPTS` (optional, default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `25000`)
+- `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`)
+- `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`)
 - `TRIPLETEX_DRY_RUN` (optional; `1|true|yes`)
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
 - `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
@@ -64,4 +66,5 @@ When registering your challenge endpoint:
 
 1. Paste the Vercel URL ending in `/solve`.
 2. If you set `TRIPLETEX_API_KEY`, use the same value in challenge submission API-key field.
+   - accepted inbound headers: `Authorization: Bearer <key>`, `Authorization: ApiKey <key>`, raw `Authorization`, or `x-api-key`.
 3. Run one sandbox test before live submission loop.

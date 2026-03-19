@@ -45,13 +45,66 @@ type PlannerTrace = (event: PlannerTraceEvent) => void;
 
 const varPattern = /\{\{\s*([a-zA-Z0-9_.]+)\s*}}/g;
 
+function canonicalVarName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
+function extractIdFromVarValue(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const object = value as Record<string, unknown>;
+  if (object.id !== undefined) return object.id;
+  if (object.value && typeof object.value === "object" && (object.value as Record<string, unknown>).id !== undefined) {
+    return (object.value as Record<string, unknown>).id;
+  }
+  if (Array.isArray(object.values) && object.values.length > 0) {
+    const first = object.values[0];
+    if (first && typeof first === "object" && (first as Record<string, unknown>).id !== undefined) {
+      return (first as Record<string, unknown>).id;
+    }
+  }
+  return undefined;
+}
+
+function resolveVarRoot(vars: Record<string, unknown>, name: string): unknown {
+  if (name in vars) return vars[name];
+
+  const canonical = canonicalVarName(name);
+  for (const [key, value] of Object.entries(vars)) {
+    if (canonicalVarName(key) === canonical) return value;
+  }
+
+  const camelIdMatch = name.match(/^(.+)Id$/);
+  if (camelIdMatch?.[1]) {
+    const base = resolveVarRoot(vars, camelIdMatch[1]);
+    const id = extractIdFromVarValue(base);
+    if (id !== undefined) return id;
+  }
+
+  const snakeIdMatch = name.match(/^(.+)_id$/i);
+  if (snakeIdMatch?.[1]) {
+    const base = resolveVarRoot(vars, snakeIdMatch[1]);
+    const id = extractIdFromVarValue(base);
+    if (id !== undefined) return id;
+  }
+
+  return undefined;
+}
+
 function resolveVar(vars: Record<string, unknown>, expr: string): unknown {
   const normalized = expr.startsWith("vars.") ? expr.slice(5) : expr;
-  if (!normalized.includes(".")) return vars[normalized];
+  if (!normalized.includes(".")) return resolveVarRoot(vars, normalized);
   const [root, ...rest] = normalized.split(".");
-  const base = vars[root];
+  const base = resolveVarRoot(vars, root);
+  if (base === undefined) return undefined;
   if (!rest.length) return base;
-  return dig(base, rest.join("."));
+  const subPath = rest.join(".");
+  const resolved = dig(base, subPath);
+  if (resolved !== undefined) return resolved;
+  if (subPath === "id") {
+    const derived = extractIdFromVarValue(base);
+    if (derived !== undefined) return derived;
+  }
+  return undefined;
 }
 
 function interpolateValue(input: unknown, vars: Record<string, unknown>): unknown {
@@ -263,6 +316,19 @@ function normalizePath(path: string): string {
   return squashed;
 }
 
+function defaultLedgerDateFrom(): string {
+  return process.env.TRIPLETEX_LEDGER_DATE_FROM?.trim() || "2000-01-01";
+}
+
+function defaultLedgerDateTo(): string {
+  return process.env.TRIPLETEX_LEDGER_DATE_TO?.trim() || "2100-12-31";
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return { ...(value as Record<string, unknown>) };
+}
+
 function endpointContractFromPath(path: string): EndpointContract | null {
   const normalized = normalizePath(path).toLowerCase();
   for (const contract of ENDPOINT_CONTRACTS_BY_MATCH) {
@@ -295,6 +361,39 @@ function pathMatchesChallengeShape(path: string, basePath: string): boolean {
   if (remainder.includes("/")) return false;
   if (remainder.startsWith(":")) return false;
   return /^\d+$/.test(remainder) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(remainder);
+}
+
+function ensurePlannerSafeQueryParams(
+  method: AllowedMethod,
+  path: string,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  if (method !== "GET") return params;
+  const contract = endpointContractFromPath(path);
+  if (!contract) return params;
+
+  const hasId = pathHasIdSegment(path, contract.basePath);
+  const next = { ...params };
+
+  if (!hasId) {
+    if (next.count === undefined || next.count === null || String(next.count).trim() === "") {
+      next.count = 1;
+    }
+    if (next.from === undefined || next.from === null || String(next.from).trim() === "") {
+      next.from = 0;
+    }
+  }
+
+  if (!hasId && (contract.basePath === "/ledger/posting" || contract.basePath === "/ledger/voucher")) {
+    if (next.dateFrom === undefined || next.dateFrom === null || String(next.dateFrom).trim() === "") {
+      next.dateFrom = defaultLedgerDateFrom();
+    }
+    if (next.dateTo === undefined || next.dateTo === null || String(next.dateTo).trim() === "") {
+      next.dateTo = defaultLedgerDateTo();
+    }
+  }
+
+  return next;
 }
 
 function entityFromPath(path: string): NormalizedEntity | null {
@@ -345,6 +444,19 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
     }
     if ((contract.idPathRequiredFor ?? []).includes(step.method as AllowedMethod) && !pathHasIdSegment(step.path, contract.basePath)) {
       issues.push(`step ${stepNumber}: ${step.method} must target an ID path like ${contract.basePath}/{id}`);
+    }
+    const stepParams = toRecord(step.params);
+    if (
+      step.method === "GET" &&
+      !pathHasIdSegment(step.path, contract.basePath) &&
+      (contract.basePath === "/ledger/posting" || contract.basePath === "/ledger/voucher")
+    ) {
+      if (stepParams.dateFrom === undefined || stepParams.dateFrom === null || String(stepParams.dateFrom).trim() === "") {
+        issues.push(`step ${stepNumber}: GET ${contract.basePath} must include query param dateFrom`);
+      }
+      if (stepParams.dateTo === undefined || stepParams.dateTo === null || String(stepParams.dateTo).trim() === "") {
+        issues.push(`step ${stepNumber}: GET ${contract.basePath} must include query param dateTo`);
+      }
     }
     if (step.method === "POST" || step.method === "PUT") {
       const isTemplateString = typeof step.body === "string" && step.body.includes("{{");
@@ -733,7 +845,11 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         {
           method: "GET",
           path: "/ledger/voucher",
-          params: { count: 1 },
+          params: {
+            dateFrom: defaultLedgerDateFrom(),
+            dateTo: defaultLedgerDateTo(),
+            count: 1,
+          },
           reason: "Read-only voucher lookup",
         },
       ],
@@ -747,7 +863,11 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         {
           method: "GET",
           path: "/ledger/posting",
-          params: { count: 1 },
+          params: {
+            dateFrom: defaultLedgerDateFrom(),
+            dateTo: defaultLedgerDateTo(),
+            count: 1,
+          },
           reason: "Read-only posting lookup",
         },
       ],
@@ -882,6 +1002,7 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- /ledger/account: GET",
     "- /ledger/posting: GET",
     "- /ledger/voucher: GET, POST, DELETE (DELETE must use /ledger/voucher/{id})",
+    "- GET /ledger/posting and GET /ledger/voucher list calls must include dateFrom and dateTo (YYYY-MM-DD).",
     "Use only relative endpoint paths, for example /employee.",
     "DELETE requests must use ID in URL path.",
     "POST and PUT requests must include JSON body.",
@@ -990,7 +1111,12 @@ export async function executePlan(
     const step = rawStep as PlanStep;
     count += 1;
     const path = interpolateValue(step.path, vars);
-    const params = interpolateValue(step.params ?? {}, vars);
+    const rawParams = interpolateValue(step.params ?? {}, vars);
+    const params = ensurePlannerSafeQueryParams(
+      step.method,
+      typeof path === "string" ? path : String(path),
+      toRecord(rawParams),
+    );
     const body = interpolateValue(step.body, vars);
     if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
     trace?.({
