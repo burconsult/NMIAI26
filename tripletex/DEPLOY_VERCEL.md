@@ -23,10 +23,11 @@ This project uses Vercel serverless functions:
 
 Model routing (all optional):
 
-- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-4.1-mini`)
+- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-5.2`)
 - `TRIPLETEX_MODEL_REASONING` (default `anthropic/claude-sonnet-4.5`)
 - `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
-- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `google/gemini-2.5-pro`)
+- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.2`)
+- `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated fallback list)
 
 Optional Google Document AI extraction (recommended for PDFs/images):
 

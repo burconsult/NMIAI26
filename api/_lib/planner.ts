@@ -1,5 +1,6 @@
 import { generateObject } from "ai";
 import { gateway } from "@ai-sdk/gateway";
+import type { GatewayLanguageModelOptions } from "@ai-sdk/gateway";
 
 import type { AttachmentSummary } from "./attachments.js";
 import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas.js";
@@ -202,7 +203,7 @@ function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): st
   ].some((token) => lower.includes(token));
 
   if (hasDocAttachment && complexAccountingTask) {
-    return process.env.TRIPLETEX_MODEL_DOC_COMPLEX?.trim() || "google/gemini-2.5-pro";
+    return process.env.TRIPLETEX_MODEL_DOC_COMPLEX?.trim() || "openai/gpt-5.2";
   }
   if (hasDocAttachment) {
     return process.env.TRIPLETEX_MODEL_DOC_FAST?.trim() || "google/gemini-2.5-flash";
@@ -210,7 +211,20 @@ function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): st
   if (complexAccountingTask) {
     return process.env.TRIPLETEX_MODEL_REASONING?.trim() || "anthropic/claude-sonnet-4.5";
   }
-  return process.env.TRIPLETEX_MODEL_DEFAULT?.trim() || "openai/gpt-4.1-mini";
+  return process.env.TRIPLETEX_MODEL_DEFAULT?.trim() || "openai/gpt-5.2";
+}
+
+function parseFallbackModels(primaryModel: string): string[] {
+  const configured =
+    process.env.TRIPLETEX_GATEWAY_FALLBACK_MODELS?.split(",")
+      .map((part) => part.trim())
+      .filter(Boolean) ?? [];
+  const defaults = [
+    "anthropic/claude-sonnet-4.5",
+    "google/gemini-2.5-pro",
+    "openai/gpt-5-nano",
+  ];
+  return [...configured, ...defaults].filter((model, index, all) => model !== primaryModel && all.indexOf(model) === index);
 }
 
 function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary[], previousError?: string): string {
@@ -243,10 +257,16 @@ export async function llmPlan(
   previousError?: string,
 ): Promise<ExecutionPlan> {
   const modelName = selectPlanningModel(payload.prompt, summaries);
+  const fallbackModels = parseFallbackModels(modelName);
   const { object } = await generateObject({
     model: gateway(modelName),
     schema: executionPlanSchema,
     temperature: 0,
+    providerOptions: {
+      gateway: {
+        models: fallbackModels,
+      } satisfies GatewayLanguageModelOptions,
+    },
     prompt: buildPlanningPrompt(payload, summaries, previousError),
   });
   return object;
