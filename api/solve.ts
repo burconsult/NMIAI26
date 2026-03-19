@@ -29,12 +29,24 @@ function traceLog(runId: string, event: string, details?: Record<string, unknown
     safeDetails.traceEvent = safeDetails.event;
     delete safeDetails.event;
   }
-  console.info("tripletex_trace", {
+  const payload = {
     runId,
     event,
     at: new Date().toISOString(),
     ...safeDetails,
-  });
+  };
+  try {
+    console.info(`tripletex_trace ${JSON.stringify(payload)}`);
+  } catch {
+    console.info(
+      `tripletex_trace ${JSON.stringify({
+        runId,
+        event,
+        at: payload.at,
+        note: "trace_payload_not_serializable",
+      })}`,
+    );
+  }
 }
 
 function tracePlanner(runId: string, event: PlannerTraceEvent): void {
