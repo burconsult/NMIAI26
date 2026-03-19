@@ -1,9 +1,9 @@
 import { generateObject } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 
-import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas";
-import { executionPlanSchema } from "./schemas";
-import { dig, primaryValue, TripletexClient } from "./tripletex";
+import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas.js";
+import { executionPlanSchema } from "./schemas.js";
+import { dig, primaryValue, TripletexClient } from "./tripletex.js";
 
 type AttachmentSummary = {
   filename: string;
@@ -272,4 +272,3 @@ export async function executePlan(client: TripletexClient, plan: ExecutionPlan, 
 
   return count;
 }
-

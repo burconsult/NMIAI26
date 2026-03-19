@@ -1,4 +1,4 @@
-import type { SolveRequest } from "./schemas";
+import type { SolveRequest } from "./schemas.js";
 
 type AttachmentSummary = {
   filename: string;

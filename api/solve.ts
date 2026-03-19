@@ -1,9 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
-import { summarizeAttachments } from "./_lib/attachments";
-import { executePlan, heuristicPlan, llmPlan, SolveError } from "./_lib/planner";
-import { solveRequestSchema } from "./_lib/schemas";
-import { TripletexClient, TripletexError } from "./_lib/tripletex";
+import { summarizeAttachments } from "./_lib/attachments.js";
+import { executePlan, heuristicPlan, llmPlan, SolveError } from "./_lib/planner.js";
+import { solveRequestSchema } from "./_lib/schemas.js";
+import { TripletexClient, TripletexError } from "./_lib/tripletex.js";
 
 export const config = {
   maxDuration: 300,
