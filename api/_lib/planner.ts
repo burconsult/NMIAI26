@@ -98,6 +98,16 @@ function extractCapitalizedName(prompt: string): string | null {
   return matches?.[0] ?? null;
 }
 
+function extractFirstNumericId(prompt: string): string | null {
+  const match = prompt.match(/\b(\d{1,9})\b/);
+  return match?.[1] ?? null;
+}
+
+function extractPhone(prompt: string): string | null {
+  const match = prompt.match(/\+?\d[\d\s-]{6,}\d/);
+  return match?.[0]?.replace(/\s+/g, " ").trim() ?? null;
+}
+
 function splitPersonName(name: string | null): { firstName: string; lastName: string } {
   if (!name) {
     const suffix = Date.now().toString().slice(-6);
@@ -197,6 +207,41 @@ type NormalizedEntity =
   | "ledger_posting"
   | "ledger_voucher";
 
+type AllowedMethod = "GET" | "POST" | "PUT" | "DELETE";
+
+type EndpointContract = {
+  basePath: string;
+  entity: NormalizedEntity;
+  methods: AllowedMethod[];
+  idPathRequiredFor?: AllowedMethod[];
+};
+
+const ENDPOINT_CONTRACTS: EndpointContract[] = [
+  { basePath: "/employee", entity: "employee", methods: ["GET", "POST", "PUT"], idPathRequiredFor: ["PUT"] },
+  { basePath: "/customer", entity: "customer", methods: ["GET", "POST", "PUT"], idPathRequiredFor: ["PUT"] },
+  { basePath: "/product", entity: "product", methods: ["GET", "POST"] },
+  { basePath: "/invoice", entity: "invoice", methods: ["GET", "POST"] },
+  { basePath: "/order", entity: "order", methods: ["GET", "POST"] },
+  {
+    basePath: "/travelExpense",
+    entity: "travelExpense",
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    idPathRequiredFor: ["PUT", "DELETE"],
+  },
+  { basePath: "/project", entity: "project", methods: ["GET", "POST"] },
+  { basePath: "/department", entity: "department", methods: ["GET", "POST"] },
+  { basePath: "/ledger/account", entity: "ledger_account", methods: ["GET"] },
+  { basePath: "/ledger/posting", entity: "ledger_posting", methods: ["GET"] },
+  {
+    basePath: "/ledger/voucher",
+    entity: "ledger_voucher",
+    methods: ["GET", "POST", "DELETE"],
+    idPathRequiredFor: ["DELETE"],
+  },
+];
+
+const ENDPOINT_CONTRACTS_BY_MATCH = [...ENDPOINT_CONTRACTS].sort((a, b) => b.basePath.length - a.basePath.length);
+
 const ENTITY_KEYWORDS: Array<{ entity: NormalizedEntity; keywords: string[] }> = [
   { entity: "employee", keywords: ["employee", "ansatt", "ansatte", "medarbeider"] },
   { entity: "customer", keywords: ["customer", "kunde", "kunder", "client", "cliente"] },
@@ -211,20 +256,51 @@ const ENTITY_KEYWORDS: Array<{ entity: NormalizedEntity; keywords: string[] }> =
   { entity: "ledger_voucher", keywords: ["ledger voucher", "voucher", "bilag"] },
 ];
 
-function entityFromPath(path: string): NormalizedEntity | null {
-  const normalizedPath = path.toLowerCase().split("?")[0] || "";
-  if (normalizedPath.startsWith("/employee")) return "employee";
-  if (normalizedPath.startsWith("/customer")) return "customer";
-  if (normalizedPath.startsWith("/department")) return "department";
-  if (normalizedPath.startsWith("/project")) return "project";
-  if (normalizedPath.startsWith("/invoice")) return "invoice";
-  if (normalizedPath.startsWith("/order")) return "order";
-  if (normalizedPath.startsWith("/product")) return "product";
-  if (normalizedPath.startsWith("/travelexpense")) return "travelExpense";
-  if (normalizedPath.startsWith("/ledger/account")) return "ledger_account";
-  if (normalizedPath.startsWith("/ledger/posting")) return "ledger_posting";
-  if (normalizedPath.startsWith("/ledger/voucher")) return "ledger_voucher";
+function normalizePath(path: string): string {
+  const noQuery = path.split("?")[0] || "";
+  const withLeading = noQuery.startsWith("/") ? noQuery : `/${noQuery}`;
+  const squashed = withLeading.replace(/\/{2,}/g, "/");
+  if (squashed.length > 1 && squashed.endsWith("/")) return squashed.slice(0, -1);
+  return squashed;
+}
+
+function endpointContractFromPath(path: string): EndpointContract | null {
+  const normalized = normalizePath(path).toLowerCase();
+  for (const contract of ENDPOINT_CONTRACTS_BY_MATCH) {
+    const base = contract.basePath.toLowerCase();
+    if (normalized === base || normalized.startsWith(`${base}/`)) return contract;
+  }
   return null;
+}
+
+function pathHasIdSegment(path: string, basePath: string): boolean {
+  const normalized = normalizePath(path);
+  const normalizedLower = normalized.toLowerCase();
+  const baseLower = basePath.toLowerCase();
+  if (!normalizedLower.startsWith(`${baseLower}/`)) return false;
+  const remainder = normalized.slice(basePath.length + 1);
+  if (!remainder) return false;
+  const firstSegment = remainder.split("/")[0] ?? "";
+  if (!firstSegment || firstSegment.startsWith(":")) return false;
+  return /^\d+$/.test(firstSegment) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(firstSegment);
+}
+
+function pathMatchesChallengeShape(path: string, basePath: string): boolean {
+  const normalized = normalizePath(path);
+  const normalizedLower = normalized.toLowerCase();
+  const baseLower = basePath.toLowerCase();
+  if (normalizedLower === baseLower) return true;
+  if (!normalizedLower.startsWith(`${baseLower}/`)) return false;
+  const remainder = normalized.slice(basePath.length + 1);
+  if (!remainder) return false;
+  if (remainder.includes("/")) return false;
+  if (remainder.startsWith(":")) return false;
+  return /^\d+$/.test(remainder) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(remainder);
+}
+
+function entityFromPath(path: string): NormalizedEntity | null {
+  const contract = endpointContractFromPath(path);
+  return contract?.entity ?? null;
 }
 
 function requestedEntitiesFromPrompt(lower: string): Set<NormalizedEntity> {
@@ -252,6 +328,33 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
   }
 
   const issues: string[] = [];
+  for (let index = 0; index < plan.steps.length; index += 1) {
+    const step = plan.steps[index] as PlanStep;
+    const stepNumber = index + 1;
+    const contract = endpointContractFromPath(step.path);
+    if (!contract) {
+      issues.push(`step ${stepNumber}: path '${step.path}' is outside allowed endpoint set`);
+      continue;
+    }
+    if (!contract.methods.includes(step.method as AllowedMethod)) {
+      issues.push(
+        `step ${stepNumber}: method ${step.method} is not allowed for ${contract.basePath} (allowed: ${contract.methods.join(", ")})`,
+      );
+    }
+    if (!pathMatchesChallengeShape(step.path, contract.basePath)) {
+      issues.push(`step ${stepNumber}: path '${step.path}' must use ${contract.basePath} or ${contract.basePath}/{id}`);
+    }
+    if ((contract.idPathRequiredFor ?? []).includes(step.method as AllowedMethod) && !pathHasIdSegment(step.path, contract.basePath)) {
+      issues.push(`step ${stepNumber}: ${step.method} must target an ID path like ${contract.basePath}/{id}`);
+    }
+    if (step.method === "POST" || step.method === "PUT") {
+      const isTemplateString = typeof step.body === "string" && step.body.includes("{{");
+      if (step.body === undefined || step.body === null || (typeof step.body !== "object" && !isTemplateString)) {
+        issues.push(`step ${stepNumber}: ${step.method} requires an object JSON body`);
+      }
+    }
+  }
+
   if (readIntent && plan.steps.some((step) => step.method !== "GET")) {
     issues.push("read-only prompt produced mutating method");
   }
@@ -283,8 +386,12 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   const email = extractEmail(prompt);
   const quoted = extractQuoted(prompt);
   const capitalized = extractCapitalizedName(prompt);
+  const numericId = extractFirstNumericId(prompt);
+  const phone = extractPhone(prompt);
   const createIntent = isCreateIntent(lower);
-  const readIntent = isReadIntent(lower) && !createIntent;
+  const deleteIntent = isDeleteIntent(lower);
+  const updateIntent = isUpdateIntent(lower) && !createIntent && !deleteIntent;
+  const readIntent = isReadIntent(lower) && !createIntent && !deleteIntent && !updateIntent;
 
   if (readIntent && (lower.includes("employee") || lower.includes("ansatt"))) {
     return {
@@ -382,14 +489,191 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("travel expense") || lower.includes("reise")) && isDeleteIntent(lower)) {
-    const idMatch = lower.match(/\b(\d{1,9})\b/);
-    if (idMatch?.[1]) {
+  if ((lower.includes("employee") || lower.includes("ansatt")) && updateIntent) {
+    const body: Record<string, unknown> = {};
+    if (email) body.email = email;
+    if (phone) body.mobileNumber = phone;
+    if (quoted || capitalized) {
+      const person = splitPersonName(quoted ?? capitalized);
+      body.firstName = person.firstName;
+      body.lastName = person.lastName;
+    }
+    if (Object.keys(body).length > 0) {
+      if (numericId) {
+        return {
+          summary: "Heuristic employee update by id flow",
+          steps: [{ method: "PUT", path: `/employee/${numericId}`, body, reason: "Update employee by explicit id" }],
+        };
+      }
       return {
-        summary: "Heuristic travel expense delete flow",
-        steps: [{ method: "DELETE", path: `/travelExpense/${idMatch[1]}` }],
+        summary: "Heuristic employee lookup + update flow",
+        steps: [
+          {
+            method: "GET",
+            path: "/employee",
+            params: { count: 1, fields: "id,firstName,lastName,email,mobileNumber" },
+            saveAs: "employee",
+            reason: "Fetch one employee id for update fallback",
+          },
+          {
+            method: "PUT",
+            path: "/employee/{{employee_id}}",
+            body,
+            reason: "Apply requested employee update fields",
+          },
+        ],
       };
     }
+  }
+
+  if ((lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) && updateIntent) {
+    const body: Record<string, unknown> = {};
+    if (email) body.email = email;
+    if (phone) body.phoneNumber = phone;
+    if (quoted || capitalized) {
+      body.name = quoted ?? capitalized;
+    }
+    if (Object.keys(body).length > 0) {
+      if (numericId) {
+        return {
+          summary: "Heuristic customer update by id flow",
+          steps: [{ method: "PUT", path: `/customer/${numericId}`, body, reason: "Update customer by explicit id" }],
+        };
+      }
+      return {
+        summary: "Heuristic customer lookup + update flow",
+        steps: [
+          {
+            method: "GET",
+            path: "/customer",
+            params: { count: 1, fields: "id,name,email,phoneNumber" },
+            saveAs: "customer",
+            reason: "Fetch one customer id for update fallback",
+          },
+          {
+            method: "PUT",
+            path: "/customer/{{customer_id}}",
+            body,
+            reason: "Apply requested customer update fields",
+          },
+        ],
+      };
+    }
+  }
+
+  if ((lower.includes("travel expense") || lower.includes("reise")) && updateIntent) {
+    const body: Record<string, unknown> = {};
+    if (quoted) body.description = quoted;
+    if (Object.keys(body).length > 0) {
+      if (numericId) {
+        return {
+          summary: "Heuristic travel expense update by id flow",
+          steps: [{ method: "PUT", path: `/travelExpense/${numericId}`, body }],
+        };
+      }
+      return {
+        summary: "Heuristic travel expense lookup + update flow",
+        steps: [
+          {
+            method: "GET",
+            path: "/travelExpense",
+            params: { count: 1, fields: "id,description" },
+            saveAs: "travelExpense",
+            reason: "Fetch one travel expense id for update fallback",
+          },
+          {
+            method: "PUT",
+            path: "/travelExpense/{{travelExpense_id}}",
+            body,
+            reason: "Apply requested travel expense update fields",
+          },
+        ],
+      };
+    }
+  }
+
+  if ((lower.includes("travel expense") || lower.includes("reise")) && deleteIntent) {
+    if (numericId) {
+      return {
+        summary: "Heuristic travel expense delete flow",
+        steps: [{ method: "DELETE", path: `/travelExpense/${numericId}` }],
+      };
+    }
+    return {
+      summary: "Heuristic travel expense fetch-and-delete flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/travelExpense",
+          params: { count: 1, fields: "id" },
+          saveAs: "travelExpense",
+          reason: "Fetch one travel expense id before delete",
+        },
+        {
+          method: "DELETE",
+          path: "/travelExpense/{{travelExpense_id}}",
+          reason: "Delete fetched travel expense",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("voucher") || lower.includes("bilag")) && deleteIntent) {
+    if (numericId) {
+      return {
+        summary: "Heuristic ledger voucher delete flow",
+        steps: [{ method: "DELETE", path: `/ledger/voucher/${numericId}` }],
+      };
+    }
+    return {
+      summary: "Heuristic ledger voucher fetch-and-delete flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/ledger/voucher",
+          params: { count: 1, fields: "id" },
+          saveAs: "voucher",
+          reason: "Fetch one voucher id before delete",
+        },
+        {
+          method: "DELETE",
+          path: "/ledger/voucher/{{voucher_id}}",
+          reason: "Delete fetched voucher",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("project") || lower.includes("prosjekt")) && createIntent) {
+    const projectName = quoted ?? capitalized ?? `Generated Project ${Date.now().toString().slice(-6)}`;
+    return {
+      summary: "Heuristic project create flow",
+      steps: [
+        {
+          method: "POST",
+          path: "/project",
+          body: { name: projectName },
+          saveAs: "project",
+          reason: "Create project from prompt fields",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("product") || lower.includes("produkt")) && createIntent) {
+    const productName = quoted ?? capitalized ?? `Generated Product ${Date.now().toString().slice(-6)}`;
+    return {
+      summary: "Heuristic product create flow",
+      steps: [
+        {
+          method: "POST",
+          path: "/product",
+          body: { name: productName },
+          saveAs: "product",
+          reason: "Create product from prompt fields",
+        },
+      ],
+    };
   }
 
   if (readIntent && (lower.includes("invoice") || lower.includes("faktura"))) {
@@ -420,7 +704,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if (readIntent && lower.includes("product")) {
+  if (readIntent && (lower.includes("product") || lower.includes("produkt"))) {
     return {
       summary: "Heuristic product list/read flow",
       steps: [
@@ -582,10 +866,25 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
   return [
     "You are a Tripletex API planner. Return only an execution plan object.",
     "Use minimal, deterministic API calls.",
-    "Allowed endpoints include /employee, /customer, /product, /invoice, /order, /travelExpense, /project, /department, /ledger/account, /ledger/posting, /ledger/voucher.",
+    "Challenge endpoint/method contract:",
+    "- /employee: GET, POST, PUT (PUT must use /employee/{id})",
+    "- /customer: GET, POST, PUT (PUT must use /customer/{id})",
+    "- /product: GET, POST",
+    "- /invoice: GET, POST",
+    "- /order: GET, POST",
+    "- /travelExpense: GET, POST, PUT, DELETE (PUT/DELETE must use /travelExpense/{id})",
+    "- /project: GET, POST",
+    "- /department: GET, POST",
+    "- /ledger/account: GET",
+    "- /ledger/posting: GET",
+    "- /ledger/voucher: GET, POST, DELETE (DELETE must use /ledger/voucher/{id})",
     "Use only relative endpoint paths, for example /employee.",
+    "DELETE requests must use ID in URL path.",
+    "POST and PUT requests must include JSON body.",
+    "GET list responses are typically wrapped as { fullResultSize: N, values: [...] }.",
     "For created entities, set saveAs and use templating in later steps with {{alias_id}} or {{alias.field}}.",
     "If prompt is read-only (e.g. list/show/find/get/do not modify), use GET-only steps and never mutate data.",
+    "Use query tips for efficient reads: fields, count, from.",
     "Use `count` for list endpoints to limit scope (typically count=1).",
     "List responses may be wrapped as { values: [...] } or single { value: {...} }.",
     "Do not include auth details in the plan.",

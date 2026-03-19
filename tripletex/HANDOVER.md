@@ -13,6 +13,7 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
   - `generateObject()` from `ai`
   - model provider from `@ai-sdk/gateway`
   - schema-constrained plan output (Zod)
+  - endpoint/method contract validator before execution (challenge matrix enforcement)
 - Task-aware model routing:
   - default planning -> OpenAI
   - document-heavy planning -> Google
@@ -105,6 +106,11 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
   - Successful solve returns HTTP 200 with exact payload `{"status":"completed"}`.
 - API tip compatibility:
   - Executor handles wrapped response formats (`value`, `values`) in `primaryValue()`.
+  - Planner prompt and validator enforce challenge API tips:
+    - `fields`, `count`, `from` query usage for efficient GET/list calls
+    - `DELETE` requires `/{id}` path
+    - `POST`/`PUT` requires JSON body
+    - list wrappers (`fullResultSize`, `values`) are expected
 
 ## 3.2 Runtime Trace Logging
 
@@ -143,6 +149,28 @@ Common event names:
 - `solve.completed`
 - `solve.completed_fail_soft`
 - `solve.failed`
+
+## 3.3 Endpoint Coverage Matrix (Current)
+
+Source matrix implemented in planner validation:
+
+- `/employee`: `GET`, `POST`, `PUT` (`PUT` requires `/employee/{id}`)
+- `/customer`: `GET`, `POST`, `PUT` (`PUT` requires `/customer/{id}`)
+- `/product`: `GET`, `POST`
+- `/invoice`: `GET`, `POST`
+- `/order`: `GET`, `POST`
+- `/travelExpense`: `GET`, `POST`, `PUT`, `DELETE` (`PUT`/`DELETE` require `/travelExpense/{id}`)
+- `/project`: `GET`, `POST`
+- `/department`: `GET`, `POST`
+- `/ledger/account`: `GET`
+- `/ledger/posting`: `GET`
+- `/ledger/voucher`: `GET`, `POST`, `DELETE` (`DELETE` requires `/ledger/voucher/{id}`)
+
+Execution guard behavior:
+
+- Any plan step outside this matrix is rejected before execution (`plan_validation_failed`) and the solver retries LLM planning.
+- Path shape is restricted to `/<endpoint>` or `/<endpoint>/{id}` for the challenge flow.
+- Mutating methods (`POST`, `PUT`) must include JSON body in the generated plan.
 
 ## 4. Environment Variables
 
@@ -220,7 +248,7 @@ Then do:
 
 Priority 1:
 
-1. Expand deterministic fallback coverage for invoice/payment/project flows.
+1. Expand deterministic fallback coverage for complex create flows (`/order`, `/invoice`, `/ledger/voucher`) when LLM path is unavailable.
 2. Add real PDF/image extraction pipeline (OCR/PDF parser).
 3. Add structured execution traces for debugging leaderboard regressions.
 
