@@ -48,6 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
   let previousError = "";
   let usedPlanner = "heuristic";
+  const llmAttemptErrors: string[] = [];
   try {
     if (!llmDisabled) {
       for (let i = 0; i < maxAttempts; i += 1) {
@@ -59,6 +60,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         } catch (error) {
           previousError = String(error);
+          llmAttemptErrors.push(previousError);
           if (i === maxAttempts - 1) break;
         }
       }
@@ -84,14 +86,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       res.status(500).json({
         error: "Solver failed",
         planner: usedPlanner,
-        details: debug ? error.message : undefined,
+        details: debug ? { message: error.message, llmAttemptErrors } : undefined,
       });
       return;
     }
     res.status(500).json({
       error: "Unexpected error",
       planner: usedPlanner,
-      details: debug ? (error instanceof Error ? error.message : String(error)) : undefined,
+      details: debug ? { message: error instanceof Error ? error.message : String(error), llmAttemptErrors } : undefined,
     });
   }
 }

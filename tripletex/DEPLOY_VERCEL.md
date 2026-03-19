@@ -28,6 +28,8 @@ Model routing (all optional):
 - `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
 - `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.2`)
 - `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated fallback list)
+- `TRIPLETEX_ENABLE_DIRECT_OPENAI_FALLBACK` (optional; `1` enables direct OpenAI fallback if gateway fails)
+- `TRIPLETEX_DIRECT_OPENAI_MODEL` (optional; default `gpt-4.1-mini`, used only when direct fallback enabled)
 
 Optional Google Document AI extraction (recommended for PDFs/images):
 

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.66",
+    "@ai-sdk/openai": "^2.0.40",
     "@google-cloud/documentai": "^9.6.0",
     "ai": "^6.0.116",
     "zod": "^4.3.6"

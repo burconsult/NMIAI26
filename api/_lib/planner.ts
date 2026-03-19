@@ -1,6 +1,7 @@
 import { generateObject } from "ai";
 import { gateway } from "@ai-sdk/gateway";
 import type { GatewayLanguageModelOptions } from "@ai-sdk/gateway";
+import { createOpenAI } from "@ai-sdk/openai";
 
 import type { AttachmentSummary } from "./attachments.js";
 import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas.js";
@@ -227,6 +228,10 @@ function parseFallbackModels(primaryModel: string): string[] {
   return [...configured, ...defaults].filter((model, index, all) => model !== primaryModel && all.indexOf(model) === index);
 }
 
+function shouldUseDirectOpenAiFallback(): boolean {
+  return process.env.TRIPLETEX_ENABLE_DIRECT_OPENAI_FALLBACK === "1" && Boolean(process.env.OPENAI_API_KEY?.trim());
+}
+
 function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary[], previousError?: string): string {
   const attachmentsText = summaries.length
     ? summaries
@@ -258,18 +263,37 @@ export async function llmPlan(
 ): Promise<ExecutionPlan> {
   const modelName = selectPlanningModel(payload.prompt, summaries);
   const fallbackModels = parseFallbackModels(modelName);
-  const { object } = await generateObject({
-    model: gateway(modelName),
-    schema: executionPlanSchema,
-    temperature: 0,
-    providerOptions: {
-      gateway: {
-        models: fallbackModels,
-      } satisfies GatewayLanguageModelOptions,
-    },
-    prompt: buildPlanningPrompt(payload, summaries, previousError),
-  });
-  return object;
+  try {
+    const { object } = await generateObject({
+      model: gateway(modelName),
+      schema: executionPlanSchema,
+      temperature: 0,
+      providerOptions: {
+        gateway: {
+          models: fallbackModels,
+        } satisfies GatewayLanguageModelOptions,
+      },
+      prompt: buildPlanningPrompt(payload, summaries, previousError),
+    });
+    return object;
+  } catch (error) {
+    if (!shouldUseDirectOpenAiFallback()) {
+      throw error;
+    }
+
+    const openai = createOpenAI({
+      apiKey: process.env.OPENAI_API_KEY?.trim(),
+      baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
+    });
+    const directModel = process.env.TRIPLETEX_DIRECT_OPENAI_MODEL?.trim() || "gpt-4.1-mini";
+    const { object } = await generateObject({
+      model: openai(directModel),
+      schema: executionPlanSchema,
+      temperature: 0,
+      prompt: buildPlanningPrompt(payload, summaries, `Gateway failed: ${String(error)}\n${previousError || ""}`.trim()),
+    });
+    return object;
+  }
 }
 
 export async function executePlan(client: TripletexClient, plan: ExecutionPlan, dryRun: boolean): Promise<number> {
