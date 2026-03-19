@@ -110,14 +110,82 @@ function isDeleteIntent(lower: string): boolean {
   ].some((token) => lower.includes(token));
 }
 
+function isReadIntent(lower: string): boolean {
+  return [
+    "list",
+    "show",
+    "find",
+    "fetch",
+    "get ",
+    "do not modify",
+    "without modifying",
+    "read-only",
+    "read only",
+    "no changes",
+    "no update",
+    "hent",
+    "vis",
+    "finn",
+    "les ",
+    "liste",
+    "ikke endre",
+    "uten å endre",
+    "kun les",
+  ].some((token) => lower.includes(token));
+}
+
 export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   const prompt = payload.prompt;
   const lower = prompt.toLowerCase();
   const email = extractEmail(prompt);
   const quoted = extractQuoted(prompt);
   const capitalized = extractCapitalizedName(prompt);
+  const createIntent = isCreateIntent(lower);
+  const readIntent = isReadIntent(lower) && !createIntent;
 
-  if ((lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) && isCreateIntent(lower)) {
+  if (readIntent && (lower.includes("employee") || lower.includes("ansatt"))) {
+    return {
+      summary: "Heuristic employee list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/employee",
+          params: { count: 1, fields: "id,firstName,lastName,email" },
+          reason: "Read-only employee lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente"))) {
+    return {
+      summary: "Heuristic customer list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/customer",
+          params: { count: 1, fields: "id,name,email" },
+          reason: "Read-only customer lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("department") || lower.includes("avdeling"))) {
+    return {
+      summary: "Heuristic department list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/department",
+          params: { count: 1, fields: "id,name" },
+          reason: "Read-only department lookup",
+        },
+      ],
+    };
+  }
+
+  if ((lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) && createIntent) {
     const customerName = quoted ?? capitalized ?? `Generated Customer ${Date.now().toString().slice(-6)}`;
     return {
       summary: "Heuristic customer create flow",
@@ -137,7 +205,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("employee") || lower.includes("ansatt")) && isCreateIntent(lower)) {
+  if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent) {
     const person = splitPersonName(quoted ?? capitalized);
     return {
       summary: "Heuristic employee create flow",
@@ -157,7 +225,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("department") || lower.includes("avdeling")) && isCreateIntent(lower)) {
+  if ((lower.includes("department") || lower.includes("avdeling")) && createIntent) {
     return {
       summary: "Heuristic department create flow",
       steps: [
@@ -179,6 +247,132 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         steps: [{ method: "DELETE", path: `/travelExpense/${idMatch[1]}` }],
       };
     }
+  }
+
+  if (readIntent && (lower.includes("invoice") || lower.includes("faktura"))) {
+    return {
+      summary: "Heuristic invoice list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/invoice",
+          params: { count: 1 },
+          reason: "Read-only invoice lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("project") || lower.includes("prosjekt"))) {
+    return {
+      summary: "Heuristic project list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/project",
+          params: { count: 1 },
+          reason: "Read-only project lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && lower.includes("product")) {
+    return {
+      summary: "Heuristic product list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/product",
+          params: { count: 1 },
+          reason: "Read-only product lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("order") || lower.includes("ordre"))) {
+    return {
+      summary: "Heuristic order list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/order",
+          params: { count: 1 },
+          reason: "Read-only order lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("voucher") || lower.includes("bilag"))) {
+    return {
+      summary: "Heuristic ledger voucher list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/ledger/voucher",
+          params: { count: 1 },
+          reason: "Read-only voucher lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("ledger posting") || lower.includes("hovedbokspost") || lower.includes("posting"))) {
+    return {
+      summary: "Heuristic ledger posting list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/ledger/posting",
+          params: { count: 1 },
+          reason: "Read-only posting lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("ledger account") || lower.includes("kontoplan") || lower.includes("account"))) {
+    return {
+      summary: "Heuristic ledger account list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/ledger/account",
+          params: { count: 1 },
+          reason: "Read-only account lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent && (lower.includes("travel expense") || lower.includes("reise"))) {
+    return {
+      summary: "Heuristic travel expense list/read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/travelExpense",
+          params: { count: 1 },
+          reason: "Read-only travel expense lookup",
+        },
+      ],
+    };
+  }
+
+  if (readIntent) {
+    return {
+      summary: "Heuristic generic read flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/employee",
+          params: { count: 1 },
+          reason: "Fallback read-only probe",
+        },
+      ],
+    };
   }
 
   throw new SolveError("No heuristic plan found; configure AI Gateway to enable LLM planning.");
@@ -245,7 +439,12 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
   return [
     "You are a Tripletex API planner. Return only an execution plan object.",
     "Use minimal, deterministic API calls.",
+    "Allowed endpoints include /employee, /customer, /product, /invoice, /order, /travelExpense, /project, /department, /ledger/account, /ledger/posting, /ledger/voucher.",
+    "Use only relative endpoint paths, for example /employee.",
     "For created entities, set saveAs and use templating in later steps with {{alias_id}} or {{alias.field}}.",
+    "If prompt is read-only (e.g. list/show/find/get/do not modify), use GET-only steps and never mutate data.",
+    "Use `count` for list endpoints to limit scope (typically count=1).",
+    "List responses may be wrapped as { values: [...] } or single { value: {...} }.",
     "Do not include auth details in the plan.",
     "",
     `Task prompt:\n${payload.prompt}`,

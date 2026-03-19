@@ -20,6 +20,7 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_DRY_RUN` (optional; `1|true|yes`)
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
 - `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
+- `TRIPLETEX_FAIL_HARD` (optional; `1` returns 500 on internal solver errors, default is fail-soft 200)
 
 Model routing (all optional):
 

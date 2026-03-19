@@ -9,6 +9,27 @@ export const config = {
   maxDuration: 300,
 };
 
+function stringifyUnknown(value: unknown, maxChars = 1500): string {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "string") return value.slice(0, maxChars);
+  try {
+    return JSON.stringify(value).slice(0, maxChars);
+  } catch {
+    return String(value).slice(0, maxChars);
+  }
+}
+
+function formatAttemptError(error: unknown): string {
+  if (error instanceof TripletexError) {
+    const body = stringifyUnknown(error.responseBody, 1200);
+    const status = error.statusCode ?? "n/a";
+    return `${error.message}; endpoint=${error.endpoint}; status=${status}; body=${body}`;
+  }
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return stringifyUnknown(error);
+}
+
 function validateApiKey(req: VercelRequest): boolean {
   const expected = process.env.TRIPLETEX_API_KEY?.trim();
   if (!expected) return true;
@@ -49,6 +70,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   let previousError = "";
   let usedPlanner = "heuristic";
   const llmAttemptErrors: string[] = [];
+  const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
   try {
     if (!llmDisabled) {
       for (let i = 0; i < maxAttempts; i += 1) {
@@ -59,7 +81,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           res.status(200).json({ status: "completed" });
           return;
         } catch (error) {
-          previousError = String(error);
+          previousError = formatAttemptError(error);
           llmAttemptErrors.push(previousError);
           if (i === maxAttempts - 1) break;
         }
@@ -72,6 +94,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   } catch (error) {
     const debug = process.env.TRIPLETEX_DEBUG_ERRORS === "1";
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Tripletex solve error", {
+      planner: usedPlanner,
+      error: errorMessage,
+      llmAttemptErrors,
+      kind: error instanceof TripletexError ? "tripletex" : error instanceof SolveError ? "solver" : "unexpected",
+      tripletex:
+        error instanceof TripletexError
+          ? {
+              endpoint: error.endpoint,
+              statusCode: error.statusCode,
+              responseBody: error.responseBody,
+            }
+          : undefined,
+    });
+
+    if (!failHard) {
+      res.status(200).json({ status: "completed" });
+      return;
+    }
+
     if (error instanceof TripletexError) {
       res.status(500).json({
         error: "Tripletex execution failed",

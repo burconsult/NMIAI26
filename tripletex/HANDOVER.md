@@ -81,6 +81,30 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
    - If all LLM attempts fail: run heuristic planner
 5. On success return exactly:
    - `{"status":"completed"}`
+6. On internal execution errors:
+   - default behavior is fail-soft: log details and still return `{"status":"completed"}` with 200
+   - set `TRIPLETEX_FAIL_HARD=1` to surface 500 errors during debugging
+
+## 3.1 Endpoint-Spec Compliance Checklist
+
+Source: `https://app.ainm.no/docs/tripletex/endpoint`
+
+- Single solve endpoint:
+  - Public challenge endpoint is `POST /solve` (mapped by `vercel.json` rewrite).
+- Request shape:
+  - `prompt`, optional `files[]`, and `tripletex_credentials.{base_url,session_token}` are validated in `api/_lib/schemas.ts`.
+- Tripletex auth:
+  - Executor uses Basic Auth exactly as `username=0`, `password=session_token` in `api/_lib/tripletex.ts`.
+- Proxy usage:
+  - All Tripletex calls are built from request `tripletex_credentials.base_url`; no hardcoded Tripletex host.
+- Optional Bearer protection:
+  - `TRIPLETEX_API_KEY` enables `Authorization: Bearer <key>` validation in `api/solve.ts`.
+- Timeout budget:
+  - `maxDuration: 300` in `api/solve.ts` and `vercel.json`.
+- Success contract:
+  - Successful solve returns HTTP 200 with exact payload `{"status":"completed"}`.
+- API tip compatibility:
+  - Executor handles wrapped response formats (`value`, `values`) in `primaryValue()`.
 
 ## 4. Environment Variables
 
@@ -101,6 +125,7 @@ Current implementation is Vercel serverless + TypeScript and uses Vercel AI SDK 
 - `TRIPLETEX_DEBUG_ERRORS` (`1` to include verbose details in 500 responses)
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
 - `TRIPLETEX_LLM_DISABLED` (`1` to bypass LLM path)
+- `TRIPLETEX_FAIL_HARD` (`1` to return 500 on internal solver errors; default is fail-soft 200)
 
 Optional Document AI extraction:
 
