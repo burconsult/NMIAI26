@@ -106,6 +106,45 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
 - API tip compatibility:
   - Executor handles wrapped response formats (`value`, `values`) in `primaryValue()`.
 
+## 3.2 Runtime Trace Logging
+
+Every `/solve` call now emits structured logs with a correlation id (`runId`) so one run can be traced across:
+
+- request acceptance/rejection
+- payload validation
+- attachment extraction (text/docai/metadata fallback)
+- planner model attempts and fallbacks
+- plan step execution
+- outbound Tripletex API requests/responses/errors
+
+Log stream format:
+
+- prefix: `tripletex_trace`
+- payload fields:
+  - `runId`
+  - `event`
+  - `at`
+  - event-specific metadata
+
+Common event names:
+
+- `solve.request_received`
+- `solve.validation_passed`
+- `solve.validation_failed`
+- `attachment.attachment_docai_attempt`
+- `attachment.attachment_docai_success`
+- `attachment.attachment_docai_failed`
+- `planner.llm_plan_start`
+- `planner.llm_plan_success`
+- `planner.plan_step_start`
+- `planner.plan_step_end`
+- `tripletex.request`
+- `tripletex.response`
+- `tripletex.network_error`
+- `solve.completed`
+- `solve.completed_fail_soft`
+- `solve.failed`
+
 ## 4. Environment Variables
 
 ### Required for LLM planner
@@ -126,6 +165,9 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
 - `TRIPLETEX_LLM_DISABLED` (`1` to bypass LLM path)
 - `TRIPLETEX_FAIL_HARD` (`1` to return 500 on internal solver errors; default is fail-soft 200)
+- `TRIPLETEX_LOGGING_ENABLED` (`0` to disable structured trace logs; default enabled)
+- `TRIPLETEX_LOG_PAYLOADS` (`1` to include truncated payload previews in API logs; default logs schema/shape only)
+- `TRIPLETEX_LOG_MAX_CHARS` (max per-string preview chars when payload logging is enabled; default `500`)
 
 Optional Document AI extraction:
 
@@ -193,6 +235,34 @@ Priority 3:
 
 1. Add benchmark mode to optimize call count and reduce 4xx retries.
 2. Add replay tooling for historical failed prompts.
+
+## 9. Edge-Case Behavior Matrix
+
+- Missing/invalid bearer token when `TRIPLETEX_API_KEY` is set:
+  - returns `401 {"error":"Unauthorized"}`
+- Non-POST request to `/solve`:
+  - returns `405 {"error":"Method not allowed"}`
+- Payload key variants:
+  - accepts both `tripletex_credentials` and `tripletexCredentials`
+  - accepts `base_url`/`baseUrl`, `session_token`/`sessionToken`
+  - accepts `content_base64`/`contentBase64`/`base64`
+  - accepts `mime_type`/`mimeType`/`type`
+- `files: null` or omitted:
+  - normalized to empty list
+- Validation failure:
+  - returns `400` and logs field-level issues in trace + warning log
+- LLM planning unavailable/failing:
+  - retries up to `TRIPLETEX_LLM_ATTEMPTS`, then heuristic planner
+- Internal execution failure:
+  - default fail-soft: returns `200 {"status":"completed"}`
+  - debug fail-hard mode: set `TRIPLETEX_FAIL_HARD=1` for `500` diagnostics
+- DocAI unavailable/misconfigured/runtime errors:
+  - non-fatal; attachment falls back to metadata extraction
+  - trace log captures failure message and fallback reason
+- Large/unparseable non-text attachments:
+  - metadata fallback without blocking solve flow
+- Unexpected Tripletex response wrappers:
+  - executor supports both `value` and `values` response patterns
 
 ## 8. Operational Runbook
 

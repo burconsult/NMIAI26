@@ -15,6 +15,32 @@ export class SolveError extends Error {
   }
 }
 
+export type PlannerTraceEvent = {
+  event:
+    | "llm_plan_start"
+    | "llm_plan_success"
+    | "llm_plan_gateway_failed"
+    | "llm_plan_direct_openai_fallback"
+    | "plan_step_start"
+    | "plan_step_end"
+    | "plan_step_var_saved"
+    | "plan_step_var_extracted";
+  model?: string;
+  fallbackModels?: string[];
+  directModel?: string;
+  step?: number;
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  path?: string;
+  dryRun?: boolean;
+  saveAs?: string;
+  extractKey?: string;
+  totalSteps?: number;
+  responseShape?: unknown;
+  error?: string;
+};
+
+type PlannerTrace = (event: PlannerTraceEvent) => void;
+
 const varPattern = /\{\{\s*([a-zA-Z0-9_.]+)\s*}}/g;
 
 function resolveVar(vars: Record<string, unknown>, expr: string): unknown {
@@ -459,9 +485,15 @@ export async function llmPlan(
   payload: SolveRequest,
   summaries: AttachmentSummary[],
   previousError?: string,
+  trace?: PlannerTrace,
 ): Promise<ExecutionPlan> {
   const modelName = selectPlanningModel(payload.prompt, summaries);
   const fallbackModels = parseFallbackModels(modelName);
+  trace?.({
+    event: "llm_plan_start",
+    model: modelName,
+    fallbackModels,
+  });
   try {
     const { object } = await generateObject({
       model: gateway(modelName),
@@ -474,8 +506,18 @@ export async function llmPlan(
       },
       prompt: buildPlanningPrompt(payload, summaries, previousError),
     });
+    trace?.({
+      event: "llm_plan_success",
+      model: modelName,
+      totalSteps: object.steps.length,
+    });
     return object;
   } catch (error) {
+    trace?.({
+      event: "llm_plan_gateway_failed",
+      model: modelName,
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (!shouldUseDirectOpenAiFallback()) {
       throw error;
     }
@@ -485,17 +527,42 @@ export async function llmPlan(
       baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
     });
     const directModel = process.env.TRIPLETEX_DIRECT_OPENAI_MODEL?.trim() || "gpt-4.1-mini";
+    trace?.({
+      event: "llm_plan_direct_openai_fallback",
+      model: modelName,
+      directModel,
+    });
     const { object } = await generateObject({
       model: openai(directModel),
       schema: executionPlanSchema,
       temperature: 0,
       prompt: buildPlanningPrompt(payload, summaries, `Gateway failed: ${String(error)}\n${previousError || ""}`.trim()),
     });
+    trace?.({
+      event: "llm_plan_success",
+      model: directModel,
+      totalSteps: object.steps.length,
+    });
     return object;
   }
 }
 
-export async function executePlan(client: TripletexClient, plan: ExecutionPlan, dryRun: boolean): Promise<number> {
+function summarizeResponseShape(response: unknown): unknown {
+  if (!response || typeof response !== "object") return response;
+  const object = response as Record<string, unknown>;
+  return {
+    keys: Object.keys(object).slice(0, 20),
+    hasValue: object.value !== undefined,
+    valuesCount: Array.isArray(object.values) ? object.values.length : undefined,
+  };
+}
+
+export async function executePlan(
+  client: TripletexClient,
+  plan: ExecutionPlan,
+  dryRun: boolean,
+  trace?: PlannerTrace,
+): Promise<number> {
   const vars: Record<string, unknown> = {};
   let count = 0;
 
@@ -506,6 +573,13 @@ export async function executePlan(client: TripletexClient, plan: ExecutionPlan, 
     const params = interpolateValue(step.params ?? {}, vars);
     const body = interpolateValue(step.body, vars);
     if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
+    trace?.({
+      event: "plan_step_start",
+      step: count,
+      method: step.method,
+      path,
+      dryRun: dryRun && step.method !== "GET",
+    });
 
     let response: unknown;
     if (dryRun && step.method !== "GET") {
@@ -516,17 +590,41 @@ export async function executePlan(client: TripletexClient, plan: ExecutionPlan, 
         body,
       });
     }
+    trace?.({
+      event: "plan_step_end",
+      step: count,
+      method: step.method,
+      path,
+      responseShape: summarizeResponseShape(response),
+    });
 
     const primary = primaryValue(response);
     if (step.saveAs) {
       vars[step.saveAs] = primary;
+      trace?.({
+        event: "plan_step_var_saved",
+        step: count,
+        saveAs: step.saveAs,
+      });
       if (primary && typeof primary === "object" && (primary as Record<string, unknown>).id !== undefined) {
         vars[`${step.saveAs}_id`] = (primary as Record<string, unknown>).id;
+        trace?.({
+          event: "plan_step_var_saved",
+          step: count,
+          saveAs: `${step.saveAs}_id`,
+        });
       }
     }
     for (const [name, sourcePath] of Object.entries(step.extract ?? {}) as Array<[string, string]>) {
       const extracted = dig(response, sourcePath);
-      if (extracted !== undefined) vars[name] = extracted;
+      if (extracted !== undefined) {
+        vars[name] = extracted;
+        trace?.({
+          event: "plan_step_var_extracted",
+          step: count,
+          extractKey: name,
+        });
+      }
     }
   }
 

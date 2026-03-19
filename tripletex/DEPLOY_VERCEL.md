@@ -21,6 +21,9 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
 - `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
 - `TRIPLETEX_FAIL_HARD` (optional; `1` returns 500 on internal solver errors, default is fail-soft 200)
+- `TRIPLETEX_LOGGING_ENABLED` (optional; `0` disables structured trace logs, default enabled)
+- `TRIPLETEX_LOG_PAYLOADS` (optional; `1` logs truncated payload previews, default disabled)
+- `TRIPLETEX_LOG_MAX_CHARS` (optional; max payload preview chars, default `500`)
 
 Model routing (all optional):
 

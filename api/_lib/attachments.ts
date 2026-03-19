@@ -10,6 +10,25 @@ export type AttachmentSummary = {
   extractionSource: "text" | "docai" | "metadata";
 };
 
+export type AttachmentTraceEvent = {
+  event:
+    | "attachments_start"
+    | "attachment_text_extracted"
+    | "attachment_docai_attempt"
+    | "attachment_docai_success"
+    | "attachment_docai_failed"
+    | "attachment_metadata_fallback";
+  filename?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  reason?: string;
+  extractionSource?: AttachmentSummary["extractionSource"];
+  durationMs?: number;
+  message?: string;
+};
+
+type AttachmentTrace = (event: AttachmentTraceEvent) => void;
+
 type DocAiConfig = {
   projectId: string;
   location: string;
@@ -136,9 +155,14 @@ async function extractWithDocumentAi(
 export async function summarizeAttachments(
   files: SolveRequest["files"],
   maxChars = 2400,
+  trace?: AttachmentTrace,
 ): Promise<AttachmentSummary[]> {
   const config = getDocAiConfig();
   const canUseDocAi = config !== null;
+  trace?.({
+    event: "attachments_start",
+    reason: canUseDocAi ? "docai_configured" : "docai_not_configured",
+  });
   const docAiClient = canUseDocAi
     ? new DocumentProcessorServiceClient({
         apiEndpoint: `${config.location}-documentai.googleapis.com`,
@@ -168,6 +192,13 @@ export async function summarizeAttachments(
         textExcerpt: toText(raw, maxChars),
         extractionSource: "text",
       });
+      trace?.({
+        event: "attachment_text_extracted",
+        filename: file.filename,
+        mimeType: file.mime_type,
+        sizeBytes: raw.byteLength,
+        extractionSource: "text",
+      });
       continue;
     }
 
@@ -180,6 +211,13 @@ export async function summarizeAttachments(
       docAiUsed < config.maxFiles;
 
     if (shouldUseDocAi) {
+      const startedAt = Date.now();
+      trace?.({
+        event: "attachment_docai_attempt",
+        filename: file.filename,
+        mimeType: file.mime_type,
+        sizeBytes: raw.byteLength,
+      });
       try {
         const extracted = await extractWithDocumentAi(docAiClient, processorName, mime, raw);
         docAiUsed += 1;
@@ -190,11 +228,37 @@ export async function summarizeAttachments(
           textExcerpt: extracted.slice(0, maxChars),
           extractionSource: "docai",
         });
+        trace?.({
+          event: "attachment_docai_success",
+          filename: file.filename,
+          mimeType: file.mime_type,
+          sizeBytes: raw.byteLength,
+          extractionSource: "docai",
+          durationMs: Date.now() - startedAt,
+        });
         continue;
-      } catch {
+      } catch (error) {
+        trace?.({
+          event: "attachment_docai_failed",
+          filename: file.filename,
+          mimeType: file.mime_type,
+          sizeBytes: raw.byteLength,
+          durationMs: Date.now() - startedAt,
+          message: error instanceof Error ? error.message : String(error),
+        });
         // Non-fatal: continue with metadata-only fallback.
       }
     }
+
+    const fallbackReason = !canUseDocAi
+      ? "docai_not_configured"
+      : !DOC_AI_MIME_TYPES.has(mime)
+        ? "mime_not_supported_by_docai"
+        : raw.byteLength > config.maxBytesPerFile
+          ? "file_too_large_for_docai"
+          : docAiUsed >= config.maxFiles
+            ? "docai_file_quota_reached"
+            : "docai_failed";
 
     summaries.push({
       filename: file.filename,
@@ -202,6 +266,14 @@ export async function summarizeAttachments(
       sizeBytes: raw.byteLength,
       textExcerpt: "",
       extractionSource: "metadata",
+    });
+    trace?.({
+      event: "attachment_metadata_fallback",
+      filename: file.filename,
+      mimeType: file.mime_type,
+      sizeBytes: raw.byteLength,
+      extractionSource: "metadata",
+      reason: fallbackReason,
     });
   }
 

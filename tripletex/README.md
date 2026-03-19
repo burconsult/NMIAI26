@@ -42,3 +42,10 @@ curl http://127.0.0.1:3000/health
 ## Configuration
 
 See full details in `tripletex/HANDOVER.md`.
+
+## Observability
+
+Each `/solve` request emits structured trace logs with a per-run correlation id (`runId`).
+
+- disable logs: `TRIPLETEX_LOGGING_ENABLED=0`
+- include payload previews: `TRIPLETEX_LOG_PAYLOADS=1`

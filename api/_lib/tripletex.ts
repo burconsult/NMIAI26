@@ -16,23 +16,96 @@ export type TripletexClientConfig = {
   baseUrl: string;
   sessionToken: string;
   timeoutMs: number;
+  onEvent?: (event: TripletexCallLogEvent) => void;
+  logPayloads?: boolean;
+  maxLogChars?: number;
+};
+
+export type TripletexCallLogEvent = {
+  kind: "request" | "response" | "network_error";
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  query?: Record<string, string>;
+  requestBody?: unknown;
+  responseBody?: unknown;
+  statusCode?: number;
+  ok?: boolean;
+  durationMs?: number;
+  error?: string;
 };
 
 export class TripletexClient {
   private readonly baseUrl: string;
   private readonly authHeader: string;
   private readonly timeoutMs: number;
+  private readonly onEvent?: (event: TripletexCallLogEvent) => void;
+  private readonly logPayloads: boolean;
+  private readonly maxLogChars: number;
 
   constructor(config: TripletexClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.authHeader = `Basic ${Buffer.from(`0:${config.sessionToken}`).toString("base64")}`;
     this.timeoutMs = config.timeoutMs;
+    this.onEvent = config.onEvent;
+    this.logPayloads = config.logPayloads ?? false;
+    this.maxLogChars = Math.max(120, config.maxLogChars ?? 500);
+  }
+
+  private emit(event: TripletexCallLogEvent): void {
+    if (!this.onEvent) return;
+    this.onEvent(event);
+  }
+
+  private summarizeForLog(value: unknown, depth = 0): unknown {
+    if (value === undefined || value === null) return value;
+    if (typeof value === "boolean" || typeof value === "number") return value;
+    if (typeof value === "string") {
+      if (this.logPayloads) return value.slice(0, this.maxLogChars);
+      return { type: "string", length: value.length };
+    }
+
+    if (Array.isArray(value)) {
+      if (depth >= 1) return { type: "array", length: value.length };
+      if (this.logPayloads) {
+        return {
+          type: "array",
+          length: value.length,
+          preview: value.slice(0, 3).map((item) => this.summarizeForLog(item, depth + 1)),
+        };
+      }
+      return { type: "array", length: value.length };
+    }
+
+    if (typeof value === "object") {
+      const object = value as Record<string, unknown>;
+      const keys = Object.keys(object);
+      if (!this.logPayloads || depth >= 1) return { type: "object", keys: keys.slice(0, 24) };
+      const preview: Record<string, unknown> = {};
+      for (const key of keys.slice(0, 12)) {
+        preview[key] = this.summarizeForLog(object[key], depth + 1);
+      }
+      return {
+        type: "object",
+        keys: keys.slice(0, 24),
+        preview,
+      };
+    }
+
+    return String(value).slice(0, this.maxLogChars);
+  }
+
+  private serializeQuery(url: URL): Record<string, string> {
+    const query: Record<string, string> = {};
+    for (const [key, value] of url.searchParams.entries()) {
+      query[key] = value;
+    }
+    return query;
   }
 
   async request(
     method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
-    options: { params?: Record<string, unknown>; body?: unknown } = {},
+  options: { params?: Record<string, unknown>; body?: unknown } = {},
   ): Promise<unknown> {
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
     const url = new URL(`${this.baseUrl}${normalizedPath}`);
@@ -40,6 +113,14 @@ export class TripletexClient {
       if (value === undefined || value === null) continue;
       url.searchParams.set(key, String(value));
     }
+    const startedAt = Date.now();
+    this.emit({
+      kind: "request",
+      method,
+      path: normalizedPath,
+      query: this.serializeQuery(url),
+      requestBody: this.summarizeForLog(options.body),
+    });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -59,6 +140,14 @@ export class TripletexClient {
       });
     } catch (error) {
       clearTimeout(timeout);
+      this.emit({
+        kind: "network_error",
+        method,
+        path: normalizedPath,
+        query: this.serializeQuery(url),
+        durationMs: Date.now() - startedAt,
+        error: String(error),
+      });
       throw new TripletexError(`Tripletex network failure: ${String(error)}`, {
         endpoint: `${method} ${normalizedPath}`,
       });
@@ -74,6 +163,16 @@ export class TripletexClient {
         parsed = { raw: text };
       }
     }
+    this.emit({
+      kind: "response",
+      method,
+      path: normalizedPath,
+      query: this.serializeQuery(url),
+      statusCode: response.status,
+      ok: response.ok,
+      durationMs: Date.now() - startedAt,
+      responseBody: this.summarizeForLog(parsed),
+    });
 
     if (!response.ok) {
       throw new TripletexError("Tripletex API request failed", {
@@ -111,4 +210,3 @@ export function primaryValue(response: unknown): unknown {
   if (Array.isArray(object.values) && object.values.length > 0) return object.values[0];
   return response;
 }
-
