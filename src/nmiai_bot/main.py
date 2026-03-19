@@ -63,6 +63,9 @@ class ReleaseGates:
     use_delivery_roles: bool
     use_zone_partitioning: bool
     use_preview_prefetch: bool
+    use_support_bot_assist: bool
+    use_adaptive_collect_until: bool
+    use_dropoff_zone_balancing: bool
 
     def public_dict(self) -> dict[str, bool]:
         return {
@@ -72,6 +75,9 @@ class ReleaseGates:
             "use_delivery_roles": self.use_delivery_roles,
             "use_zone_partitioning": self.use_zone_partitioning,
             "use_preview_prefetch": self.use_preview_prefetch,
+            "use_support_bot_assist": self.use_support_bot_assist,
+            "use_adaptive_collect_until": self.use_adaptive_collect_until,
+            "use_dropoff_zone_balancing": self.use_dropoff_zone_balancing,
         }
 
 
@@ -141,6 +147,9 @@ def _resolve_release_gates_for_difficulty(
         use_delivery_roles=difficulty in {"medium"},
         use_zone_partitioning=difficulty in {"hard"},
         use_preview_prefetch=allow_preview_prefetch,
+        use_support_bot_assist=False,
+        use_adaptive_collect_until=False,
+        use_dropoff_zone_balancing=False,
     )
     if normalized_mode == "stable":
         return ReleaseGates(
@@ -150,6 +159,9 @@ def _resolve_release_gates_for_difficulty(
             use_delivery_roles=False,
             use_zone_partitioning=False,
             use_preview_prefetch=False,
+            use_support_bot_assist=False,
+            use_adaptive_collect_until=False,
+            use_dropoff_zone_balancing=False,
         )
     if normalized_mode == "experimental":
         return ReleaseGates(
@@ -159,6 +171,9 @@ def _resolve_release_gates_for_difficulty(
             use_delivery_roles=difficulty in {"medium", "nightmare"},
             use_zone_partitioning=difficulty in {"medium", "hard", "expert"},
             use_preview_prefetch=difficulty != "easy",
+            use_support_bot_assist=False,
+            use_adaptive_collect_until=False,
+            use_dropoff_zone_balancing=False,
         )
     return base
 
@@ -256,6 +271,9 @@ def resolve_strategy(profile: str | None, seed: int | None = None) -> StrategyOp
                 use_delivery_roles=False,
                 use_zone_partitioning=False,
                 use_preview_prefetch=allow_preview_prefetch,
+                use_support_bot_assist=False,
+                use_adaptive_collect_until=False,
+                use_dropoff_zone_balancing=False,
             ),
         )
 
@@ -274,6 +292,9 @@ def resolve_strategy(profile: str | None, seed: int | None = None) -> StrategyOp
             use_delivery_roles=False,
             use_zone_partitioning=False,
             use_preview_prefetch=allow_preview_prefetch,
+            use_support_bot_assist=False,
+            use_adaptive_collect_until=False,
+            use_dropoff_zone_balancing=False,
         ),
     )
 
@@ -734,6 +755,9 @@ class Planner:
             tuple(zone)
             for zone in state.get("drop_off_zones") or [state["drop_off"]]
         ]
+        self.round_no = int(state.get("round", 0) or 0)
+        self.max_rounds = int(state.get("max_rounds", 300) or 300)
+        self.rounds_remaining = max(0, self.max_rounds - self.round_no)
 
     def plan_for_bot(self, bot: dict[str, Any]) -> Action:
         bot_id = bot["id"]
@@ -741,7 +765,13 @@ class Planner:
         inventory = list(bot["inventory"])
         remaining_active = self.remaining_items(self.active_order)
         needed_for_pickup = self.remaining_after_inventory(remaining_active)
-        collect_until = self.effective_collect_until(int(bot_id))
+        collect_until = self.effective_collect_until(
+            int(bot_id),
+            position=position,
+            inventory=inventory,
+            remaining_active=remaining_active,
+            needed_for_pickup=needed_for_pickup,
+        )
         holds_active_items = self.inventory_matches_active(inventory, remaining_active)
 
         if self.can_drop_off(position, inventory, remaining_active):
@@ -752,6 +782,7 @@ class Planner:
                 position=position,
                 inventory=inventory,
                 remaining_active=remaining_active,
+                needed_for_pickup=needed_for_pickup,
             )
         if self.should_clear_dropoff_staging(
             int(bot_id),
@@ -845,6 +876,7 @@ class Planner:
         position: Coord,
         inventory: list[str],
         remaining_active: Counter[str],
+        needed_for_pickup: Counter[str],
     ) -> Action:
         if inventory and self.inventory_matches_active(inventory, remaining_active):
             return self.move_to_dropoff(bot_id, position)
@@ -857,6 +889,26 @@ class Planner:
             cleared = self.move_off_dropoff_staging(bot_id, position)
             if cleared is not None:
                 return cleared
+        if (
+            self.strategy.release_gates.use_support_bot_assist
+            and not inventory
+            and needed_for_pickup
+        ):
+            adjacent_active = self.find_adjacent_item(
+                position,
+                needed_for_pickup,
+                allow_claimed=False,
+            )
+            if adjacent_active is not None:
+                self.claim_item(adjacent_active)
+                return {
+                    "bot": bot_id,
+                    "action": "pick_up",
+                    "item_id": adjacent_active["id"],
+                }
+            active_target = self.find_best_item(position, needed_for_pickup, bot_id=bot_id)
+            if active_target is not None:
+                return self.move_toward_item(bot_id, position, tuple(active_target["position"]))
         return {"bot": bot_id, "action": "wait"}
 
     def remaining_items(self, order: dict[str, Any] | None) -> Counter[str]:
@@ -973,14 +1025,57 @@ class Planner:
         needed.subtract(carried)
         return Counter({item_type: count for item_type, count in needed.items() if count > 0})
 
-    def effective_collect_until(self, bot_id: int) -> int:
+    def effective_collect_until(
+        self,
+        bot_id: int,
+        *,
+        position: Coord,
+        inventory: list[str],
+        remaining_active: Counter[str],
+        needed_for_pickup: Counter[str],
+    ) -> int:
         base = max(1, min(3, self.strategy.collect_until))
         if not self.strategy.release_gates.use_delivery_roles or self.bot_count <= 1:
-            return base
-        # Lower IDs prioritize order completion by returning earlier.
-        if bot_id == self.sorted_bot_ids[0]:
+            role_adjusted = base
+        else:
+            # Lower IDs prioritize order completion by returning earlier.
+            role_adjusted = 1 if bot_id == self.sorted_bot_ids[0] else base
+
+        if not self.strategy.release_gates.use_adaptive_collect_until:
+            return role_adjusted
+        if not inventory:
+            return role_adjusted
+        if self.rounds_remaining <= 30:
             return 1
-        return base
+
+        # If dropping now can complete the active order, prioritize immediate delivery.
+        remaining_after_delivery = remaining_active.copy()
+        for item_type in inventory:
+            if remaining_after_delivery[item_type] > 0:
+                remaining_after_delivery[item_type] -= 1
+        if not any(count > 0 for count in remaining_after_delivery.values()):
+            return 1
+
+        nearest_dropoff = min(manhattan(position, zone) for zone in self.drop_off_zones)
+        nearest_needed_item = self.nearest_needed_item_distance(position, needed_for_pickup)
+        if nearest_needed_item is None:
+            return 1
+        if nearest_needed_item > nearest_dropoff * 2:
+            return 1
+        return role_adjusted
+
+    def nearest_needed_item_distance(self, start: Coord, needed: Counter[str]) -> int | None:
+        best: int | None = None
+        for item in self.state["items"]:
+            if needed[item["type"]] <= 0:
+                continue
+            goal_cells = self.adjacent_open_cells(tuple(item["position"]), exclude=start)
+            distance = self.shortest_distance(start, goal_cells)
+            if distance is None:
+                continue
+            if best is None or distance < best:
+                best = distance
+        return best
 
     def claim_item(self, item: dict[str, Any]) -> None:
         self.claimed_items.add(item["id"])
@@ -1148,11 +1243,63 @@ class Planner:
             if self.is_dropoff_enterable(zone, start)
         ]
         if enterable_zones:
+            if (
+                self.strategy.release_gates.use_dropoff_zone_balancing
+                and len(enterable_zones) > 1
+            ):
+                target_zone = self.select_balanced_dropoff_zone(
+                    bot_id=bot_id,
+                    start=start,
+                    zones=enterable_zones,
+                )
+                if target_zone is not None:
+                    return self.move_toward(bot_id, start, [target_zone])
             return self.move_toward(bot_id, start, enterable_zones)
         staging_cells = self.dropoff_staging_cells(exclude=start)
         if staging_cells:
             return self.move_toward(bot_id, start, staging_cells)
         return {"bot": bot_id, "action": "wait"}
+
+    def select_balanced_dropoff_zone(
+        self,
+        *,
+        bot_id: int,
+        start: Coord,
+        zones: list[Coord],
+    ) -> Coord | None:
+        best: tuple[tuple[int, int, int], Coord] | None = None
+        for zone in zones:
+            distance = self.shortest_distance(start, [zone])
+            if distance is None:
+                continue
+            rank = (
+                self.dropoff_zone_incoming_load(zone),
+                distance,
+                zlib.crc32(f"{bot_id}:{zone[0]}:{zone[1]}".encode("utf-8")),
+            )
+            if best is None or rank < best[0]:
+                best = (rank, zone)
+        if best is None:
+            return None
+        return best[1]
+
+    def dropoff_zone_incoming_load(self, zone: Coord) -> int:
+        remaining_active = self.remaining_items(self.active_order)
+        load = 0
+        for bot in self.state["bots"]:
+            inventory = list(bot["inventory"])
+            if not self.inventory_matches_active(inventory, remaining_active):
+                continue
+            position = tuple(bot["position"])
+            distance = manhattan(position, zone)
+            if distance <= 1:
+                load += 2
+            elif distance <= 3:
+                load += 1
+        for position in self.planned_next_positions.values():
+            if manhattan(position, zone) <= 1:
+                load += 1
+        return load
 
     def move_off_dropoff_staging(self, bot_id: int, start: Coord) -> Action | None:
         if not (start in self.drop_off_zones or self.is_dropoff_staging_cell(start)):

@@ -233,6 +233,22 @@ Recommended development flow:
   - live validation results
   - rejected experiments and why they were not promoted
 
+## Versioning And Rollback
+
+- Baseline checkpoint tag before gated v2 planner features:
+  - `strategy-baseline-2026-03-19-before-v2`
+- Roll back to the baseline checkpoint locally:
+
+```bash
+git checkout strategy-baseline-2026-03-19-before-v2
+```
+
+- Return to current mainline:
+
+```bash
+git checkout main
+```
+
 ## Troubleshooting
 
 `HTTP 403` on websocket:

@@ -591,16 +591,21 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(medium.collect_until, 2)
         self.assertEqual(medium.gate_mode, "experimental")
         self.assertTrue(medium.release_gates.use_zone_partitioning)
+        self.assertFalse(medium.release_gates.use_support_bot_assist)
+        self.assertFalse(medium.release_gates.use_adaptive_collect_until)
         self.assertEqual(hard.collect_until, 3)
         self.assertFalse(hard.allow_preview_prefetch)
         self.assertTrue(hard.random_tie_break)
         self.assertEqual(hard.seed, 17)
         self.assertFalse(hard.release_gates.use_delivery_roles)
         self.assertTrue(hard.release_gates.use_zone_partitioning)
+        self.assertFalse(hard.release_gates.use_support_bot_assist)
         self.assertEqual(expert.gate_mode, "experimental")
         self.assertTrue(expert.release_gates.use_collision_reservations)
         self.assertTrue(expert.release_gates.use_zone_partitioning)
         self.assertFalse(expert.release_gates.use_delivery_roles)
+        self.assertFalse(expert.release_gates.use_support_bot_assist)
+        self.assertFalse(expert.release_gates.use_adaptive_collect_until)
         self.assertTrue(expert.random_tie_break)
         self.assertEqual(expert.seed, 17)
         self.assertEqual(nightmare.collect_until, 2)
@@ -609,6 +614,9 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(nightmare.seed, 17)
         self.assertTrue(nightmare.release_gates.use_collision_reservations)
         self.assertFalse(nightmare.release_gates.use_zone_partitioning)
+        self.assertFalse(nightmare.release_gates.use_support_bot_assist)
+        self.assertFalse(nightmare.release_gates.use_adaptive_collect_until)
+        self.assertFalse(nightmare.release_gates.use_dropoff_zone_balancing)
 
     def test_release_gates_stable_disables_advanced_features(self) -> None:
         strategy = resolve_strategy_for_difficulty("hard", gate_mode="stable")
@@ -691,6 +699,123 @@ class PlannerTests(unittest.TestCase):
         planner = Planner(state, strategy)
         self.assertIn(5, planner.active_worker_ids)
         self.assertEqual(planner.zone_penalty(5, (27, 5)), 0)
+
+    def test_support_bot_assist_picks_adjacent_needed_item(self) -> None:
+        state = {
+            "grid": {"width": 8, "height": 8, "walls": []},
+            "bots": [
+                {"id": 0, "position": [1, 1], "inventory": []},
+                {"id": 1, "position": [2, 1], "inventory": []},
+                {"id": 2, "position": [4, 4], "inventory": []},
+            ],
+            "items": [{"id": "milk_1", "type": "milk", "position": [4, 5]}],
+            "orders": [
+                {
+                    "id": "o1",
+                    "items_required": ["milk"],
+                    "items_delivered": [],
+                    "status": "active",
+                }
+            ],
+            "drop_off": [1, 7],
+            "drop_off_zones": [[1, 7]],
+            "round": 0,
+            "max_rounds": 300,
+            "score": 0,
+        }
+        strategy = resolve_strategy_for_difficulty("hard", gate_mode="experimental")
+        strategy = replace(
+            strategy,
+            release_gates=replace(
+                strategy.release_gates,
+                use_support_bot_assist=True,
+            ),
+        )
+        actions = choose_actions(state, strategy=strategy)
+        by_bot = {action["bot"]: action for action in actions}
+        self.assertEqual(by_bot[2]["action"], "pick_up")
+        self.assertEqual(by_bot[2]["item_id"], "milk_1")
+
+    def test_adaptive_collect_until_prefers_near_dropoff_delivery(self) -> None:
+        state = {
+            "grid": {"width": 30, "height": 12, "walls": []},
+            "bots": [{"id": 0, "position": [5, 5], "inventory": ["milk"]}],
+            "items": [{"id": "bread_1", "type": "bread", "position": [25, 1]}],
+            "orders": [
+                {
+                    "id": "o1",
+                    "items_required": ["milk", "bread"],
+                    "items_delivered": [],
+                    "status": "active",
+                }
+            ],
+            "drop_off": [5, 6],
+            "drop_off_zones": [[5, 6]],
+            "round": 100,
+            "max_rounds": 300,
+            "score": 0,
+        }
+        adaptive_strategy = resolve_strategy_for_difficulty("hard", gate_mode="experimental")
+        adaptive_strategy = replace(
+            adaptive_strategy,
+            release_gates=replace(
+                adaptive_strategy.release_gates,
+                use_adaptive_collect_until=True,
+            ),
+        )
+        non_adaptive_strategy = replace(
+            adaptive_strategy,
+            release_gates=replace(
+                adaptive_strategy.release_gates,
+                use_adaptive_collect_until=False,
+            ),
+        )
+
+        adaptive_action = choose_actions(state, strategy=adaptive_strategy)[0]
+        non_adaptive_action = choose_actions(state, strategy=non_adaptive_strategy)[0]
+
+        self.assertEqual(adaptive_action["action"], "move_down")
+        self.assertNotEqual(non_adaptive_action["action"], "move_down")
+
+    def test_dropoff_zone_balancing_avoids_loaded_zone(self) -> None:
+        state = {
+            "grid": {"width": 9, "height": 9, "walls": []},
+            "bots": [
+                {"id": 0, "position": [4, 3], "inventory": ["milk"]},
+                {"id": 1, "position": [4, 6], "inventory": ["milk"]},
+                {"id": 2, "position": [4, 5], "inventory": ["bread"]},
+                {"id": 3, "position": [4, 7], "inventory": ["milk"]},
+            ],
+            "items": [],
+            "orders": [
+                {
+                    "id": "o1",
+                    "items_required": ["milk", "bread", "milk"],
+                    "items_delivered": [],
+                    "status": "active",
+                }
+            ],
+            "drop_off": [4, 7],
+            "drop_off_zones": [[1, 7], [4, 7], [7, 7]],
+            "round": 0,
+            "max_rounds": 500,
+            "score": 0,
+        }
+        strategy = resolve_strategy_for_difficulty("nightmare", gate_mode="experimental")
+        strategy = replace(
+            strategy,
+            release_gates=replace(
+                strategy.release_gates,
+                use_dropoff_zone_balancing=True,
+            ),
+        )
+        planner = Planner(state, strategy)
+        target = planner.select_balanced_dropoff_zone(
+            bot_id=0,
+            start=(4, 3),
+            zones=[(1, 7), (4, 7), (7, 7)],
+        )
+        self.assertIn(target, {(1, 7), (7, 7)})
 
 
 if __name__ == "__main__":

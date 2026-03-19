@@ -81,6 +81,30 @@ Interpretation:
 - Hard and Expert changes improved live or held stable with a net gain.
 - Nightmare remains the biggest upside area; current stable ceiling observed today is 146.
 
+## Gated V2 Planner Features (Implemented, Safety-Off By Default)
+
+Following review feedback, three features were implemented behind release gates:
+
+- `use_support_bot_assist`
+- `use_adaptive_collect_until`
+- `use_dropoff_zone_balancing`
+
+Safety status:
+
+- All three gates are currently **disabled by default** in all gate modes (`stable/default/experimental`).
+- Reason: when auto-enabled in broad local A/B sweeps, aggregate scores regressed heavily:
+  - hard: `204 -> 29` (`-175`)
+  - expert: `277 -> 29` (`-248`)
+  - nightmare: `108 -> 1` (`-107`)
+- They remain in code with dedicated unit tests, so each can be tuned and promoted incrementally later.
+
+Production guardrail:
+
+- A baseline git checkpoint was created before introducing these gated features:
+  - `strategy-baseline-2026-03-19-before-v2`
+- Current live sanity check after keeping gates off:
+  - nightmare experimental: `146` (unchanged from stable best)
+
 ## Rejected Experiments
 
 - Enable preview prefetch on nightmare: severe regression (`score=3` in live test).
