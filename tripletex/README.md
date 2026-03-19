@@ -45,7 +45,7 @@ See full details in `tripletex/HANDOVER.md`.
 
 ## Observability
 
-Each `/solve` request emits structured trace logs with a per-run correlation id (`runId`).
+Each `/solve` request emits one consolidated structured trace log with a per-run correlation id (`runId`) and full `events[]` timeline.
 
 - disable logs: `TRIPLETEX_LOGGING_ENABLED=0`
 - include payload previews: `TRIPLETEX_LOG_PAYLOADS=1`

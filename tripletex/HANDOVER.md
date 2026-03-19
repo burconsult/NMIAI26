@@ -108,7 +108,7 @@ Source: `https://app.ainm.no/docs/tripletex/endpoint`
 
 ## 3.2 Runtime Trace Logging
 
-Every `/solve` call now emits structured logs with a correlation id (`runId`) so one run can be traced across:
+Every `/solve` call now emits a single consolidated structured log entry with a correlation id (`runId`) and `events[]`, so one run can be traced across:
 
 - request acceptance/rejection
 - payload validation
@@ -122,9 +122,8 @@ Log stream format:
 - prefix: `tripletex_trace`
 - payload fields:
   - `runId`
-  - `event`
-  - `at`
-  - event-specific metadata
+  - `eventCount`
+  - `events[]` (timeline, each with `event`, `at`, and event-specific metadata)
 
 Common event names:
 
