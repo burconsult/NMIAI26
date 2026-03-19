@@ -280,6 +280,178 @@ async function runGates(): Promise<void> {
     },
   });
 
+  gates.push({
+    name: "executePlan hydrates missing product_id template by creating product",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") {
+          return jsonResponse(200, { values: [{ id: 701 }] });
+        }
+        if (method === "GET" && path === "/product") {
+          return jsonResponse(200, { values: [] });
+        }
+        if (method === "POST" && path === "/product") {
+          return jsonResponse(201, { value: { id: 702 } });
+        }
+        if (method === "POST" && path === "/order") {
+          const orderBody = body as Record<string, unknown>;
+          const product = orderBody?.product as Record<string, unknown> | undefined;
+          if (!product?.id) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "product", message: "Kan ikke være null." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 703 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "hydrate missing product id",
+          steps: [
+            {
+              method: "GET",
+              path: "/customer",
+              params: { organizationNumber: "935400759", count: 1 },
+              saveAs: "customer",
+            },
+            {
+              method: "GET",
+              path: "/product",
+              params: { name: "Data Advisory", count: 1 },
+              saveAs: "product",
+            },
+            {
+              method: "POST",
+              path: "/order",
+              body: {
+                customer: { id: "{{customer_id}}" },
+                product: { id: "{{product_id}}" },
+                orderDate: "2026-03-19",
+                deliveryDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const productCreates = calls.filter((call) => call.method === "POST" && call.path === "/product");
+        assert.equal(productCreates.length, 1, "expected product create to hydrate missing product_id");
+        const orderPosts = calls.filter((call) => call.method === "POST" && call.path === "/order");
+        assert.equal(orderPosts.length, 1, "expected one order create call");
+        const orderBody = orderPosts[0]?.body as Record<string, unknown>;
+        const product = orderBody?.product as Record<string, unknown> | undefined;
+        assert.equal(product?.id, 702, "order should reference hydrated product id");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "executePlan hydrates multiple missing template ids in same step",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") return jsonResponse(200, { values: [] });
+        if (method === "POST" && path === "/customer") return jsonResponse(201, { value: { id: 811 } });
+        if (method === "GET" && path === "/product") return jsonResponse(200, { values: [] });
+        if (method === "POST" && path === "/product") return jsonResponse(201, { value: { id: 812 } });
+        if (method === "POST" && path === "/order") {
+          const orderBody = body as Record<string, unknown>;
+          const customer = orderBody?.customer as Record<string, unknown> | undefined;
+          const product = orderBody?.product as Record<string, unknown> | undefined;
+          if (!customer?.id || !product?.id) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "customer", message: "Kan ikke være null." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 813 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "hydrate multiple missing ids",
+          steps: [
+            {
+              method: "GET",
+              path: "/customer",
+              params: { organizationNumber: "935400759", count: 1 },
+              saveAs: "customer",
+            },
+            {
+              method: "GET",
+              path: "/product",
+              params: { name: "Data Advisory", count: 1 },
+              saveAs: "product",
+            },
+            {
+              method: "POST",
+              path: "/order",
+              body: {
+                customer: { id: "{{customerId}}" },
+                product: { id: "{{productId}}" },
+                orderDate: "2026-03-19",
+                deliveryDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/customer").length,
+          1,
+          "expected customer create during template hydration",
+        );
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/product").length,
+          1,
+          "expected product create during template hydration",
+        );
+        const orderPosts = calls.filter((call) => call.method === "POST" && call.path === "/order");
+        assert.equal(orderPosts.length, 1, "expected one order create call");
+        const orderBody = orderPosts[0]?.body as Record<string, unknown>;
+        assert.equal((orderBody?.customer as Record<string, unknown> | undefined)?.id, 811);
+        assert.equal((orderBody?.product as Record<string, unknown> | undefined)?.id, 812);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
   const failures: Array<{ name: string; error: string }> = [];
   for (const gate of gates) {
     try {

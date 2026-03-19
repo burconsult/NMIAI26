@@ -1282,7 +1282,14 @@ function firstIdFromVars(vars: Record<string, unknown>, candidates: string[]): u
   const wanted = candidates.map((value) => canonicalVarName(value));
   for (const [key, value] of Object.entries(vars)) {
     const canonicalKey = canonicalVarName(key);
-    if (!wanted.some((needle) => canonicalKey.includes(needle))) continue;
+    if (key.endsWith("_lookup_path") || key.endsWith("_lookup_params")) continue;
+    const matchesWanted = wanted.some(
+      (needle) =>
+        canonicalKey === needle ||
+        canonicalKey === `${needle}id` ||
+        canonicalKey === `${needle}value`,
+    );
+    if (!matchesWanted) continue;
     if (typeof value === "string" || typeof value === "number") return value;
     const extracted = extractIdFromVarValue(value);
     if (extracted !== undefined) return extracted;
@@ -1386,6 +1393,124 @@ function validationFieldsFromError(error: unknown): string[] {
   return [...new Set(fields)];
 }
 
+function missingTemplateVarFromError(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/Template variable '([^']+)' not found/);
+  const value = match?.[1]?.trim();
+  return value || null;
+}
+
+function aliasRootFromTemplateVar(templateVar: string): string {
+  const withoutPrefix = templateVar.startsWith("vars.") ? templateVar.slice(5) : templateVar;
+  const root = withoutPrefix.split(".")[0] ?? withoutPrefix;
+  if (/^(.+)_id$/i.test(root)) return root.replace(/^(.+)_id$/i, "$1");
+  if (/^(.+)Id$/.test(root)) return root.replace(/^(.+)Id$/, "$1");
+  return root;
+}
+
+function aliasLookupParams(vars: Record<string, unknown>, alias: string): Record<string, unknown> {
+  return toRecord(vars[`${alias}_lookup_params`]);
+}
+
+function buildListParams(path: string, params: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...params };
+  if (next.count === undefined || next.count === null || String(next.count).trim() === "") next.count = 1;
+  if (next.from === undefined || next.from === null || String(next.from).trim() === "") next.from = 0;
+  if (next.fields === undefined || next.fields === null || String(next.fields).trim() === "") next.fields = "id";
+  return ensurePlannerSafeQueryParams("GET", path, next);
+}
+
+async function fetchOrCreateProductId(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+  allowCreate: boolean,
+): Promise<unknown> {
+  const existing = cachedId(vars, "product");
+  if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "product");
+  try {
+    const fetched = await client.request("GET", "/product", {
+      params: buildListParams("/product", lookup),
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      cacheId(vars, "product", id);
+      return id;
+    }
+  } catch {
+    // Ignore and continue.
+  }
+  if (!allowCreate) return undefined;
+  const nameHint = typeof lookup.name === "string" && lookup.name.trim().length > 0 ? lookup.name.trim() : undefined;
+  try {
+    const created = await client.request("POST", "/product", {
+      body: {
+        name: nameHint || generatedEntityName("/product"),
+      },
+    });
+    const id = extractIdFromVarValue(primaryValue(created));
+    if (hasValue(id)) {
+      cacheId(vars, "product", id);
+      return id;
+    }
+  } catch {
+    // Ignore: caller will keep original failure.
+  }
+  return undefined;
+}
+
+async function ensureTemplateVariable(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+  templateVar: string,
+  currentMethod: AllowedMethod,
+): Promise<boolean> {
+  if (resolveVar(vars, templateVar) !== undefined) return true;
+  const alias = aliasRootFromTemplateVar(templateVar);
+  const allowCreate = currentMethod === "POST";
+
+  if (alias === "customer") {
+    await fetchOrCreateCustomerId(client, vars);
+  } else if (alias === "employee") {
+    await fetchOrCreateEmployeeId(client, vars);
+  } else if (alias === "order") {
+    await fetchOrCreateOrderId(client, vars);
+  } else if (alias === "product") {
+    await fetchOrCreateProductId(client, vars, allowCreate);
+  } else if (alias === "project") {
+    if (allowCreate) {
+      const managerId = await fetchOrCreateEmployeeId(client, vars);
+      try {
+        const created = await client.request("POST", "/project", {
+          body: {
+            name: generatedEntityName("/project"),
+            startDate: todayIsoDate(),
+            ...(hasValue(managerId) ? { projectManager: { id: managerId } } : {}),
+          },
+        });
+        const id = extractIdFromVarValue(primaryValue(created));
+        if (hasValue(id)) cacheId(vars, "project", id);
+      } catch {
+        // Ignore.
+      }
+    }
+  } else if (alias === "department") {
+    if (allowCreate) {
+      try {
+        const created = await client.request("POST", "/department", {
+          body: { name: generatedEntityName("/department") },
+        });
+        const id = extractIdFromVarValue(primaryValue(created));
+        if (hasValue(id)) cacheId(vars, "department", id);
+      } catch {
+        // Ignore.
+      }
+    }
+  }
+
+  return resolveVar(vars, templateVar) !== undefined;
+}
+
 function cachedId(vars: Record<string, unknown>, key: string): unknown {
   return firstIdFromVars(vars, [`${key}_id`, `${key}Id`, key]);
 }
@@ -1402,9 +1527,10 @@ async function fetchOrCreateCustomerId(
 ): Promise<unknown> {
   const existing = cachedId(vars, "customer");
   if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "customer");
   try {
     const fetched = await client.request("GET", "/customer", {
-      params: { count: 1, from: 0, fields: "id" },
+      params: buildListParams("/customer", lookup),
     });
     const id = extractIdFromVarValue(primaryValue(fetched));
     if (hasValue(id)) {
@@ -1438,9 +1564,10 @@ async function fetchOrCreateEmployeeId(
 ): Promise<unknown> {
   const existing = cachedId(vars, "employee");
   if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "employee");
   try {
     const fetched = await client.request("GET", "/employee", {
-      params: { count: 1, from: 0, fields: "id" },
+      params: buildListParams("/employee", lookup),
     });
     const id = extractIdFromVarValue(primaryValue(fetched));
     if (hasValue(id)) {
@@ -1474,9 +1601,10 @@ async function fetchOrCreateOrderId(
 ): Promise<unknown> {
   const existing = cachedId(vars, "order");
   if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "order");
   try {
     const fetched = await client.request("GET", "/order", {
-      params: { count: 1, from: 0, fields: "id" },
+      params: buildListParams("/order", lookup),
     });
     const id = extractIdFromVarValue(primaryValue(fetched));
     if (hasValue(id)) {
@@ -1658,14 +1786,30 @@ export async function executePlan(
   for (const rawStep of plan.steps) {
     const step = rawStep as PlanStep;
     count += 1;
-    const path = interpolateValue(step.path, vars);
-    const rawParams = interpolateValue(step.params ?? {}, vars);
+    let path: unknown;
+    let rawParams: unknown;
+    let body: unknown;
+    let repairedTemplateRounds = 0;
+    while (true) {
+      try {
+        path = interpolateValue(step.path, vars);
+        rawParams = interpolateValue(step.params ?? {}, vars);
+        body = interpolateValue(step.body, vars);
+        break;
+      } catch (error) {
+        const missing = missingTemplateVarFromError(error);
+        if (missing === null) throw error;
+        if (repairedTemplateRounds >= 6) throw error;
+        const repaired = await ensureTemplateVariable(client, vars, missing, step.method);
+        if (!repaired) throw error;
+        repairedTemplateRounds += 1;
+      }
+    }
     const params = ensurePlannerSafeQueryParams(
       step.method,
       typeof path === "string" ? path : String(path),
       toRecord(rawParams),
     );
-    let body = interpolateValue(step.body, vars);
     if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
     const preflightDefaults = withPreflightBodyDefaults(step.method, path, body, vars);
     if (preflightDefaults.changed) body = preflightDefaults.body;
@@ -1726,6 +1870,10 @@ export async function executePlan(
     const primary = primaryValue(response);
     if (step.saveAs) {
       vars[step.saveAs] = primary;
+      if (step.method === "GET") {
+        vars[`${step.saveAs}_lookup_path`] = path;
+        vars[`${step.saveAs}_lookup_params`] = { ...(params ?? {}) };
+      }
       trace?.({
         event: "plan_step_var_saved",
         step: count,
