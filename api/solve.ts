@@ -22,18 +22,38 @@ function shouldLogPayloads(): boolean {
   return process.env.TRIPLETEX_LOG_PAYLOADS === "1";
 }
 
-function traceLog(runId: string, event: string, details?: Record<string, unknown>): void {
+type TraceRecord = {
+  runId: string;
+  event: string;
+  at: string;
+} & Record<string, unknown>;
+
+function appendTrace(
+  traceEvents: TraceRecord[],
+  runId: string,
+  event: string,
+  details?: Record<string, unknown>,
+): void {
   if (!shouldLogSolveTrace()) return;
   const safeDetails = details ? { ...details } : undefined;
   if (safeDetails && "event" in safeDetails) {
     safeDetails.traceEvent = safeDetails.event;
     delete safeDetails.event;
   }
-  const payload = {
+  traceEvents.push({
     runId,
     event,
     at: new Date().toISOString(),
     ...safeDetails,
+  });
+}
+
+function flushTrace(traceEvents: TraceRecord[], runId: string): void {
+  if (!shouldLogSolveTrace() || traceEvents.length === 0) return;
+  const payload = {
+    runId,
+    eventCount: traceEvents.length,
+    events: traceEvents,
   };
   try {
     console.info(`tripletex_trace ${JSON.stringify(payload)}`);
@@ -41,24 +61,24 @@ function traceLog(runId: string, event: string, details?: Record<string, unknown
     console.info(
       `tripletex_trace ${JSON.stringify({
         runId,
-        event,
-        at: payload.at,
+        event: "trace.flush_failed",
+        at: new Date().toISOString(),
         note: "trace_payload_not_serializable",
       })}`,
     );
   }
 }
 
-function tracePlanner(runId: string, event: PlannerTraceEvent): void {
-  traceLog(runId, `planner.${event.event}`, event as unknown as Record<string, unknown>);
+function tracePlanner(traceEvents: TraceRecord[], runId: string, event: PlannerTraceEvent): void {
+  appendTrace(traceEvents, runId, `planner.${event.event}`, event as unknown as Record<string, unknown>);
 }
 
-function traceTripletexCall(runId: string, event: TripletexCallLogEvent): void {
-  traceLog(runId, `tripletex.${event.kind}`, event as unknown as Record<string, unknown>);
+function traceTripletexCall(traceEvents: TraceRecord[], runId: string, event: TripletexCallLogEvent): void {
+  appendTrace(traceEvents, runId, `tripletex.${event.kind}`, event as unknown as Record<string, unknown>);
 }
 
-function traceAttachment(runId: string, event: AttachmentTraceEvent): void {
-  traceLog(runId, `attachment.${event.event}`, event as unknown as Record<string, unknown>);
+function traceAttachment(traceEvents: TraceRecord[], runId: string, event: AttachmentTraceEvent): void {
+  appendTrace(traceEvents, runId, `attachment.${event.event}`, event as unknown as Record<string, unknown>);
 }
 
 function normalizeSolveBody(body: unknown): unknown {
@@ -168,164 +188,174 @@ function validateApiKey(req: VercelRequest): boolean {
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   const runId = createRunId();
-  traceLog(runId, "solve.request_received", {
-    method: req.method,
-    hasAuthorizationHeader: Boolean(req.headers.authorization),
-  });
-
-  if (req.method !== "POST") {
-    traceLog(runId, "solve.rejected_method", { method: req.method });
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
-
-  if (!validateApiKey(req)) {
-    traceLog(runId, "solve.rejected_unauthorized");
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-
-  const normalizedBody = normalizeSolveBody(req.body);
-  const parsed = solveRequestSchema.safeParse(normalizedBody);
-  if (!parsed.success) {
-    traceLog(runId, "solve.validation_failed", {
-      issues: parsed.error.issues.slice(0, 12).map((issue) => ({
-        path: issue.path.join("."),
-        code: issue.code,
-        message: issue.message,
-      })),
-    });
-    console.warn("Invalid solve payload", {
-      issues: parsed.error.issues.slice(0, 12).map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message,
-        code: issue.code,
-      })),
-    });
-    res.status(400).json({ error: "Invalid request payload", details: parsed.error.flatten() });
-    return;
-  }
-
-  const payload = parsed.data;
-  traceLog(runId, "solve.validation_passed", {
-    promptLength: payload.prompt.length,
-    fileCount: payload.files.length,
-    baseUrlHost: new URL(payload.tripletex_credentials.base_url).host,
-  });
-
-  const client = new TripletexClient({
-    baseUrl: payload.tripletex_credentials.base_url,
-    sessionToken: payload.tripletex_credentials.session_token,
-    timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "25000"),
-    onEvent: (event) => traceTripletexCall(runId, event),
-    logPayloads: shouldLogPayloads(),
-    maxLogChars: Math.max(120, Number(process.env.TRIPLETEX_LOG_MAX_CHARS || "500")),
-  });
-  const dryRun = ["1", "true", "yes"].includes((process.env.TRIPLETEX_DRY_RUN || "").toLowerCase());
-  const attachments = await summarizeAttachments(payload.files, 2400, (event) => traceAttachment(runId, event));
-  traceLog(runId, "solve.attachments_summarized", {
-    attachments: attachments.map((file) => ({
-      filename: file.filename,
-      mimeType: file.mimeType,
-      sizeBytes: file.sizeBytes,
-      extractionSource: file.extractionSource,
-      textLength: file.textExcerpt.length,
-    })),
-  });
-
-  const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
-  const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
-  let previousError = "";
-  let usedPlanner = "heuristic";
-  const llmAttemptErrors: string[] = [];
-  const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
+  const traceEvents: TraceRecord[] = [];
   try {
-    if (!llmDisabled) {
-      for (let i = 0; i < maxAttempts; i += 1) {
-        traceLog(runId, "solve.llm_attempt_start", { attempt: i + 1, maxAttempts });
-        try {
-          const plan = await llmPlan(payload, attachments, previousError || undefined, (event) =>
-            tracePlanner(runId, event),
-          );
-          await executePlan(client, plan, dryRun, (event) => tracePlanner(runId, event));
-          usedPlanner = "vercel-ai-sdk";
-          traceLog(runId, "solve.completed", { planner: usedPlanner, llmAttempt: i + 1 });
-          res.status(200).json({ status: "completed" });
-          return;
-        } catch (error) {
-          previousError = formatAttemptError(error);
-          llmAttemptErrors.push(previousError);
-          traceLog(runId, "solve.llm_attempt_failed", {
-            attempt: i + 1,
-            error: previousError,
-          });
-          if (i === maxAttempts - 1) break;
+    appendTrace(traceEvents, runId, "solve.request_received", {
+      method: req.method,
+      hasAuthorizationHeader: Boolean(req.headers.authorization),
+    });
+
+    if (req.method !== "POST") {
+      appendTrace(traceEvents, runId, "solve.rejected_method", { method: req.method });
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
+
+    if (!validateApiKey(req)) {
+      appendTrace(traceEvents, runId, "solve.rejected_unauthorized");
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const normalizedBody = normalizeSolveBody(req.body);
+    const parsed = solveRequestSchema.safeParse(normalizedBody);
+    if (!parsed.success) {
+      appendTrace(traceEvents, runId, "solve.validation_failed", {
+        issues: parsed.error.issues.slice(0, 12).map((issue) => ({
+          path: issue.path.join("."),
+          code: issue.code,
+          message: issue.message,
+        })),
+      });
+      console.warn("Invalid solve payload", {
+        issues: parsed.error.issues.slice(0, 12).map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+          code: issue.code,
+        })),
+      });
+      res.status(400).json({ error: "Invalid request payload", details: parsed.error.flatten() });
+      return;
+    }
+
+    const payload = parsed.data;
+    appendTrace(traceEvents, runId, "solve.validation_passed", {
+      promptLength: payload.prompt.length,
+      fileCount: payload.files.length,
+      baseUrlHost: new URL(payload.tripletex_credentials.base_url).host,
+    });
+
+    const client = new TripletexClient({
+      baseUrl: payload.tripletex_credentials.base_url,
+      sessionToken: payload.tripletex_credentials.session_token,
+      timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "25000"),
+      onEvent: (event) => traceTripletexCall(traceEvents, runId, event),
+      logPayloads: shouldLogPayloads(),
+      maxLogChars: Math.max(120, Number(process.env.TRIPLETEX_LOG_MAX_CHARS || "500")),
+    });
+    const dryRun = ["1", "true", "yes"].includes((process.env.TRIPLETEX_DRY_RUN || "").toLowerCase());
+    const attachments = await summarizeAttachments(payload.files, 2400, (event) =>
+      traceAttachment(traceEvents, runId, event),
+    );
+    appendTrace(traceEvents, runId, "solve.attachments_summarized", {
+      attachments: attachments.map((file) => ({
+        filename: file.filename,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        extractionSource: file.extractionSource,
+        textLength: file.textExcerpt.length,
+      })),
+    });
+
+    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
+    const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
+    let previousError = "";
+    let usedPlanner = "heuristic";
+    const llmAttemptErrors: string[] = [];
+    const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
+    try {
+      if (!llmDisabled) {
+        for (let i = 0; i < maxAttempts; i += 1) {
+          appendTrace(traceEvents, runId, "solve.llm_attempt_start", { attempt: i + 1, maxAttempts });
+          try {
+            const plan = await llmPlan(payload, attachments, previousError || undefined, (event) =>
+              tracePlanner(traceEvents, runId, event),
+            );
+            await executePlan(client, plan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
+            usedPlanner = "vercel-ai-sdk";
+            appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner, llmAttempt: i + 1 });
+            res.status(200).json({ status: "completed" });
+            return;
+          } catch (error) {
+            previousError = formatAttemptError(error);
+            llmAttemptErrors.push(previousError);
+            appendTrace(traceEvents, runId, "solve.llm_attempt_failed", {
+              attempt: i + 1,
+              error: previousError,
+            });
+            if (i === maxAttempts - 1) break;
+          }
         }
       }
-    }
 
-    const fallbackPlan = heuristicPlan(payload);
-    traceLog(runId, "solve.heuristic_fallback", {
-      summary: fallbackPlan.summary,
-      steps: fallbackPlan.steps.length,
-    });
-    await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(runId, event));
-    traceLog(runId, "solve.completed", { planner: usedPlanner || "heuristic" });
-    res.status(200).json({ status: "completed" });
-    return;
-  } catch (error) {
-    const debug = process.env.TRIPLETEX_DEBUG_ERRORS === "1";
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error("Tripletex solve error", {
-      runId,
-      planner: usedPlanner,
-      error: errorMessage,
-      llmAttemptErrors,
-      kind: error instanceof TripletexError ? "tripletex" : error instanceof SolveError ? "solver" : "unexpected",
-      tripletex:
-        error instanceof TripletexError
-          ? {
-              endpoint: error.endpoint,
-              statusCode: error.statusCode,
-              responseBody: error.responseBody,
-            }
-          : undefined,
-    });
-    traceLog(runId, "solve.failed", {
-      planner: usedPlanner,
-      error: errorMessage,
-      failHard,
-      llmAttemptErrors,
-    });
-
-    if (!failHard) {
-      traceLog(runId, "solve.completed_fail_soft");
+      const fallbackPlan = heuristicPlan(payload);
+      appendTrace(traceEvents, runId, "solve.heuristic_fallback", {
+        summary: fallbackPlan.summary,
+        steps: fallbackPlan.steps.length,
+      });
+      await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
+      appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner || "heuristic" });
       res.status(200).json({ status: "completed" });
       return;
-    }
+    } catch (error) {
+      const debug = process.env.TRIPLETEX_DEBUG_ERRORS === "1";
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error("Tripletex solve error", {
+        runId,
+        planner: usedPlanner,
+        error: errorMessage,
+        llmAttemptErrors,
+        kind: error instanceof TripletexError ? "tripletex" : error instanceof SolveError ? "solver" : "unexpected",
+        tripletex:
+          error instanceof TripletexError
+            ? {
+                endpoint: error.endpoint,
+                statusCode: error.statusCode,
+                responseBody: error.responseBody,
+              }
+            : undefined,
+      });
+      appendTrace(traceEvents, runId, "solve.failed", {
+        planner: usedPlanner,
+        error: errorMessage,
+        failHard,
+        llmAttemptErrors,
+      });
 
-    if (error instanceof TripletexError) {
+      if (!failHard) {
+        appendTrace(traceEvents, runId, "solve.completed_fail_soft");
+        res.status(200).json({ status: "completed" });
+        return;
+      }
+
+      if (error instanceof TripletexError) {
+        res.status(500).json({
+          error: "Tripletex execution failed",
+          planner: usedPlanner,
+          endpoint: error.endpoint,
+          statusCode: error.statusCode,
+          details: debug ? error.responseBody : undefined,
+        });
+        return;
+      }
+      if (error instanceof SolveError) {
+        res.status(500).json({
+          error: "Solver failed",
+          planner: usedPlanner,
+          details: debug ? { message: error.message, llmAttemptErrors } : undefined,
+        });
+        return;
+      }
       res.status(500).json({
-        error: "Tripletex execution failed",
+        error: "Unexpected error",
         planner: usedPlanner,
-        endpoint: error.endpoint,
-        statusCode: error.statusCode,
-        details: debug ? error.responseBody : undefined,
+        details: debug ? { message: error instanceof Error ? error.message : String(error), llmAttemptErrors } : undefined,
       });
       return;
     }
-    if (error instanceof SolveError) {
-      res.status(500).json({
-        error: "Solver failed",
-        planner: usedPlanner,
-        details: debug ? { message: error.message, llmAttemptErrors } : undefined,
-      });
-      return;
-    }
-    res.status(500).json({
-      error: "Unexpected error",
-      planner: usedPlanner,
-      details: debug ? { message: error instanceof Error ? error.message : String(error), llmAttemptErrors } : undefined,
-    });
+  } finally {
+    // Flush one consolidated trace entry per request.
+    // This avoids fragmented log ingestion and keeps full run timelines searchable by runId.
+    flushTrace(traceEvents, runId);
   }
 }
