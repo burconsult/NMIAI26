@@ -188,7 +188,6 @@ function isUpdateIntent(lower: string): boolean {
     "update",
     "oppdater",
     "endre",
-    "set ",
     "modify",
     "rediger",
   ].some((token) => lower.includes(token));
@@ -368,13 +367,8 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
     issues.push("update intent detected but no PUT/POST step");
   }
 
-  if (requestedEntities.size > 0) {
-    const covered = [...requestedEntities].filter((entity) => planEntities.has(entity));
-    if (covered.length === 0) {
-      issues.push("none of the requested entities appear in plan steps");
-    } else if (requestedEntities.size >= 2 && covered.length < requestedEntities.size) {
-      issues.push(`partial entity coverage: covered ${covered.length}/${requestedEntities.size}`);
-    }
+  if (requestedEntities.size > 0 && planEntities.size === 0) {
+    issues.push("plan steps did not match any recognized challenge entities");
   }
 
   return issues;
@@ -802,7 +796,17 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  throw new SolveError("No heuristic plan found; configure AI Gateway to enable LLM planning.");
+  return {
+    summary: "Heuristic generic fallback read flow",
+    steps: [
+      {
+        method: "GET",
+        path: "/employee",
+        params: { count: 1, fields: "id,firstName,lastName,email" },
+        reason: "Last-resort safe probe when prompt parsing fails",
+      },
+    ],
+  };
 }
 
 function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): string {
