@@ -21,6 +21,8 @@ export type PlannerTraceEvent = {
     | "llm_plan_success"
     | "llm_plan_gateway_failed"
     | "llm_plan_direct_openai_fallback"
+    | "plan_validation_failed"
+    | "plan_validation_passed"
     | "plan_step_start"
     | "plan_step_end"
     | "plan_step_var_saved"
@@ -158,6 +160,110 @@ function isReadIntent(lower: string): boolean {
     "uten å endre",
     "kun les",
   ].some((token) => lower.includes(token));
+}
+
+function isUpdateIntent(lower: string): boolean {
+  return [
+    "update",
+    "oppdater",
+    "endre",
+    "set ",
+    "modify",
+    "rediger",
+  ].some((token) => lower.includes(token));
+}
+
+type NormalizedEntity =
+  | "employee"
+  | "customer"
+  | "department"
+  | "project"
+  | "invoice"
+  | "order"
+  | "product"
+  | "travelExpense"
+  | "ledger_account"
+  | "ledger_posting"
+  | "ledger_voucher";
+
+const ENTITY_KEYWORDS: Array<{ entity: NormalizedEntity; keywords: string[] }> = [
+  { entity: "employee", keywords: ["employee", "ansatt", "ansatte", "medarbeider"] },
+  { entity: "customer", keywords: ["customer", "kunde", "kunder", "client", "cliente"] },
+  { entity: "department", keywords: ["department", "avdeling", "avdelinger"] },
+  { entity: "project", keywords: ["project", "prosjekt", "prosjekter"] },
+  { entity: "invoice", keywords: ["invoice", "faktura", "fakturaer"] },
+  { entity: "order", keywords: ["order", "ordre", "ordrer"] },
+  { entity: "product", keywords: ["product", "produkt", "produkter"] },
+  { entity: "travelExpense", keywords: ["travel expense", "reise", "reiseregning", "reiseregninger"] },
+  { entity: "ledger_account", keywords: ["ledger account", "kontoplan", "konto"] },
+  { entity: "ledger_posting", keywords: ["ledger posting", "hovedbokspost", "postering"] },
+  { entity: "ledger_voucher", keywords: ["ledger voucher", "voucher", "bilag"] },
+];
+
+function entityFromPath(path: string): NormalizedEntity | null {
+  const normalizedPath = path.toLowerCase().split("?")[0] || "";
+  if (normalizedPath.startsWith("/employee")) return "employee";
+  if (normalizedPath.startsWith("/customer")) return "customer";
+  if (normalizedPath.startsWith("/department")) return "department";
+  if (normalizedPath.startsWith("/project")) return "project";
+  if (normalizedPath.startsWith("/invoice")) return "invoice";
+  if (normalizedPath.startsWith("/order")) return "order";
+  if (normalizedPath.startsWith("/product")) return "product";
+  if (normalizedPath.startsWith("/travelexpense")) return "travelExpense";
+  if (normalizedPath.startsWith("/ledger/account")) return "ledger_account";
+  if (normalizedPath.startsWith("/ledger/posting")) return "ledger_posting";
+  if (normalizedPath.startsWith("/ledger/voucher")) return "ledger_voucher";
+  return null;
+}
+
+function requestedEntitiesFromPrompt(lower: string): Set<NormalizedEntity> {
+  const set = new Set<NormalizedEntity>();
+  for (const entry of ENTITY_KEYWORDS) {
+    if (entry.keywords.some((keyword) => lower.includes(keyword))) {
+      set.add(entry.entity);
+    }
+  }
+  return set;
+}
+
+export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): string[] {
+  const lower = prompt.toLowerCase();
+  const createIntent = isCreateIntent(lower);
+  const deleteIntent = isDeleteIntent(lower);
+  const updateIntent = isUpdateIntent(lower);
+  const readIntent = isReadIntent(lower) && !createIntent && !deleteIntent && !updateIntent;
+
+  const requestedEntities = requestedEntitiesFromPrompt(lower);
+  const planEntities = new Set<NormalizedEntity>();
+  for (const step of plan.steps) {
+    const entity = entityFromPath(step.path);
+    if (entity) planEntities.add(entity);
+  }
+
+  const issues: string[] = [];
+  if (readIntent && plan.steps.some((step) => step.method !== "GET")) {
+    issues.push("read-only prompt produced mutating method");
+  }
+  if (createIntent && !plan.steps.some((step) => step.method === "POST")) {
+    issues.push("create intent detected but no POST step");
+  }
+  if (deleteIntent && !plan.steps.some((step) => step.method === "DELETE")) {
+    issues.push("delete intent detected but no DELETE step");
+  }
+  if (updateIntent && !plan.steps.some((step) => step.method === "PUT" || step.method === "POST")) {
+    issues.push("update intent detected but no PUT/POST step");
+  }
+
+  if (requestedEntities.size > 0) {
+    const covered = [...requestedEntities].filter((entity) => planEntities.has(entity));
+    if (covered.length === 0) {
+      issues.push("none of the requested entities appear in plan steps");
+    } else if (requestedEntities.size >= 2 && covered.length < requestedEntities.size) {
+      issues.push(`partial entity coverage: covered ${covered.length}/${requestedEntities.size}`);
+    }
+  }
+
+  return issues;
 }
 
 export function heuristicPlan(payload: SolveRequest): ExecutionPlan {

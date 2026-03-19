@@ -1,7 +1,14 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 import { summarizeAttachments, type AttachmentTraceEvent } from "./_lib/attachments.js";
-import { executePlan, heuristicPlan, llmPlan, SolveError, type PlannerTraceEvent } from "./_lib/planner.js";
+import {
+  executePlan,
+  heuristicPlan,
+  llmPlan,
+  SolveError,
+  validatePlanForPrompt,
+  type PlannerTraceEvent,
+} from "./_lib/planner.js";
 import { solveRequestSchema } from "./_lib/schemas.js";
 import { TripletexClient, TripletexError, type TripletexCallLogEvent } from "./_lib/tripletex.js";
 
@@ -271,6 +278,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             const plan = await llmPlan(payload, attachments, previousError || undefined, (event) =>
               tracePlanner(traceEvents, runId, event),
             );
+            const planIssues = validatePlanForPrompt(payload.prompt, plan);
+            if (planIssues.length > 0) {
+              tracePlanner(traceEvents, runId, {
+                event: "plan_validation_failed",
+                error: planIssues.join(" | "),
+              });
+              throw new SolveError(`Plan validation failed: ${planIssues.join(" | ")}`);
+            }
+            tracePlanner(traceEvents, runId, {
+              event: "plan_validation_passed",
+              totalSteps: plan.steps.length,
+            });
             await executePlan(client, plan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
             usedPlanner = "vercel-ai-sdk";
             appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner, llmAttempt: i + 1 });
