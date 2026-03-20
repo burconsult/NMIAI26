@@ -57,22 +57,33 @@ function appendTrace(
 
 function flushTrace(traceEvents: TraceRecord[], runId: string): void {
   if (!shouldLogSolveTrace() || traceEvents.length === 0) return;
-  const payload = {
-    runId,
-    eventCount: traceEvents.length,
-    events: traceEvents,
-  };
-  try {
-    console.info(`tripletex_trace ${JSON.stringify(payload)}`);
-  } catch {
-    console.info(
-      `tripletex_trace ${JSON.stringify({
-        runId,
-        event: "trace.flush_failed",
-        at: new Date().toISOString(),
-        note: "trace_payload_not_serializable",
-      })}`,
-    );
+  const chunkSizeRaw = Number(process.env.TRIPLETEX_TRACE_CHUNK_SIZE || "60");
+  const chunkSize = Number.isFinite(chunkSizeRaw) ? Math.max(10, Math.min(200, Math.round(chunkSizeRaw))) : 60;
+  const totalChunks = Math.ceil(traceEvents.length / chunkSize);
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * chunkSize;
+    const events = traceEvents.slice(start, start + chunkSize);
+    const payload = {
+      runId,
+      eventCount: traceEvents.length,
+      chunkIndex: index + 1,
+      chunkCount: totalChunks,
+      events,
+    };
+    try {
+      console.info(`tripletex_trace ${JSON.stringify(payload)}`);
+    } catch {
+      console.info(
+        `tripletex_trace ${JSON.stringify({
+          runId,
+          event: "trace.flush_failed",
+          at: new Date().toISOString(),
+          chunkIndex: index + 1,
+          chunkCount: totalChunks,
+          note: "trace_payload_not_serializable",
+        })}`,
+      );
+    }
   }
 }
 
@@ -290,7 +301,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let previousError = "";
     let usedPlanner = "heuristic";
     const llmAttemptErrors: string[] = [];
-    const failHard = process.env.TRIPLETEX_FAIL_HARD !== "0";
+    const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
     try {
       if (!llmDisabled) {
         for (let i = 0; i < maxAttempts; i += 1) {

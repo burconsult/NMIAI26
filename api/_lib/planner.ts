@@ -860,7 +860,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
               {
                 product: { id: "{{product_id}}" },
                 count: 1,
-                priceExcludingVatCurrency: milestoneAmount,
+                unitPriceExcludingVatCurrency: milestoneAmount,
                 description: `Milestone ${milestonePercent}% of fixed price`,
               },
             ],
@@ -1978,7 +1978,7 @@ function withPreflightBodyDefaults(
         {
           product: { id: productId },
           count: 1,
-          priceExcludingVatCurrency: amountHint ?? 1,
+          unitPriceExcludingVatCurrency: amountHint ?? 1,
         },
       ];
       changed = true;
@@ -2370,47 +2370,59 @@ async function fetchOrCreateCustomerId(
 async function fetchOrCreateEmployeeId(
   client: TripletexClient,
   vars: Record<string, unknown>,
+  preferCreate = false,
 ): Promise<unknown> {
   const existing = cachedId(vars, "employee");
-  if (hasValue(existing)) return existing;
+  if (hasValue(existing) && !preferCreate) return existing;
   const lookup = aliasLookupParams(vars, "employee");
-  try {
-    const fetched = await client.request("GET", "/employee", {
-      params: buildListParams("/employee", lookup),
-    });
-    const id = extractIdFromVarValue(primaryValue(fetched));
-    if (hasValue(id)) {
-      cacheId(vars, "employee", id);
-      return id;
+  if (!preferCreate) {
+    try {
+      const fetched = await client.request("GET", "/employee", {
+        params: buildListParams("/employee", lookup),
+      });
+      const id = extractIdFromVarValue(primaryValue(fetched));
+      if (hasValue(id)) {
+        cacheId(vars, "employee", id);
+        return id;
+      }
+    } catch {
+      // Ignore and try create fallback.
     }
-  } catch {
-    // Ignore and try create fallback.
   }
   const departmentId = await fetchOrCreateDepartmentId(client, vars, true);
   const firstNameHint = firstNonEmptyString(lookup.firstName);
   const lastNameHint = firstNonEmptyString(lookup.lastName);
   const emailHint = firstNonEmptyString(lookup.email);
   const fallbackPerson = splitPersonName(firstNonEmptyString(lookup.name, lookup.fullName, lookup.employeeName) ?? null);
-  try {
-    const createBody: Record<string, unknown> = {
-      firstName: firstNameHint || fallbackPerson.firstName,
-      lastName: lastNameHint || fallbackPerson.lastName,
-      userType: defaultEmployeeUserType(),
-    };
-    if (emailHint) createBody.email = emailHint;
-    if (hasValue(departmentId)) {
-      createBody.department = { id: departmentId };
+  const fallbackEmail = `generated.${Date.now().toString().slice(-6)}@example.org`;
+  const emailCandidates = preferCreate
+    ? [emailHint, fallbackEmail].filter((value, index, all): value is string => Boolean(value) && all.indexOf(value) === index)
+    : emailHint
+      ? [emailHint]
+      : [];
+  const candidateSet = emailCandidates.length > 0 ? emailCandidates : [undefined];
+  for (const candidateEmail of candidateSet) {
+    try {
+      const createBody: Record<string, unknown> = {
+        firstName: firstNameHint || fallbackPerson.firstName,
+        lastName: lastNameHint || fallbackPerson.lastName,
+        userType: defaultEmployeeUserType(),
+      };
+      if (candidateEmail) createBody.email = candidateEmail;
+      if (hasValue(departmentId)) {
+        createBody.department = { id: departmentId };
+      }
+      const created = await client.request("POST", "/employee", {
+        body: createBody,
+      });
+      const id = extractIdFromVarValue(primaryValue(created));
+      if (hasValue(id)) {
+        cacheId(vars, "employee", id);
+        return id;
+      }
+    } catch {
+      // Try next candidate email (if any).
     }
-    const created = await client.request("POST", "/employee", {
-      body: createBody,
-    });
-    const id = extractIdFromVarValue(primaryValue(created));
-    if (hasValue(id)) {
-      cacheId(vars, "employee", id);
-      return id;
-    }
-  } catch {
-    // Ignore: caller will continue without injected ID.
   }
   return undefined;
 }
@@ -2450,7 +2462,7 @@ async function fetchOrCreateOrderId(
         {
           product: { id: productId },
           count: 1,
-          priceExcludingVatCurrency: amountHint ?? 1,
+          unitPriceExcludingVatCurrency: amountHint ?? 1,
         },
       ];
     }
@@ -2492,6 +2504,8 @@ async function enrichVarsForValidationRetry(
     roots.has("projectManagerId") ||
     normalizedPath === "/project" ||
     normalizedPath === "/travelExpense";
+  const needsFreshProjectManager =
+    normalizedPath === "/project" && (roots.has("projectManager") || roots.has("projectManagerId"));
   const needsOrder = roots.has("order") || roots.has("orderId") || roots.has("orders") || normalizedPath === "/invoice";
   const needsProduct =
     roots.has("product") ||
@@ -2505,7 +2519,7 @@ async function enrichVarsForValidationRetry(
     normalizedPath === "/employee";
 
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
-  if (needsEmployee) await fetchOrCreateEmployeeId(client, vars);
+  if (needsEmployee) await fetchOrCreateEmployeeId(client, vars, needsFreshProjectManager);
   if (needsOrder) await fetchOrCreateOrderId(client, vars);
   if (needsProduct) await fetchOrCreateProductId(client, vars, true);
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
@@ -2617,7 +2631,7 @@ function withValidationFieldDefaults(
             {
               product: { id: productId },
               count: 1,
-              priceExcludingVatCurrency: amountHint ?? 1,
+              unitPriceExcludingVatCurrency: amountHint ?? 1,
             },
           ];
           changed = true;
@@ -2629,6 +2643,17 @@ function withValidationFieldDefaults(
   }
 
   // Keep critical defaults even when validation field names vary by language or nesting.
+  const projectManagerRequested = fields.some((field) => {
+    const cleaned = field.replace(/\[\d+]/g, "").trim();
+    return cleaned === "projectManager" || cleaned.startsWith("projectManager.");
+  });
+  if (normalizedPath === "/project" && projectManagerRequested && hasValue(employeeId)) {
+    const currentProjectManager = toRecord(next.projectManager);
+    if (!hasValue(currentProjectManager.id) || String(currentProjectManager.id) !== String(employeeId)) {
+      next.projectManager = { id: employeeId };
+      changed = true;
+    }
+  }
   if (normalizedPath === "/project") {
     setIfMissing("startDate", todayIsoDate());
   }
@@ -2644,7 +2669,7 @@ function withValidationFieldDefaults(
         {
           product: { id: productId },
           count: 1,
-          priceExcludingVatCurrency: amountHint ?? 1,
+          unitPriceExcludingVatCurrency: amountHint ?? 1,
         },
       ];
       changed = true;

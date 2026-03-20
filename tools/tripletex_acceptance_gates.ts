@@ -1149,7 +1149,7 @@ async function runGates(): Promise<void> {
       const orderBody = (orderStep?.body ?? {}) as Record<string, unknown>;
       const lines = orderBody.orderLines as Array<Record<string, unknown>> | undefined;
       assert(Array.isArray(lines) && lines.length > 0, "expected orderLines in milestone flow");
-      const price = Number(lines[0]?.priceExcludingVatCurrency);
+      const price = Number(lines[0]?.unitPriceExcludingVatCurrency);
       assert.equal(price, 50537.5, "expected 25% of 202150 as milestone amount");
     },
   });
