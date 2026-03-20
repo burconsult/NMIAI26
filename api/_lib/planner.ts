@@ -351,6 +351,11 @@ function extractCustomerNameFromPrompt(prompt: string): string | null {
     .replace(/^(?:customer|client|kunde)\s+/i, "")
     .trim();
   if (candidate && candidate.length >= 2) return candidate;
+  const prefixed = prompt.match(
+    /(?:kunden|kunde|customer|client|cliente)\s+([A-ZÆØÅÀ-ÖØ-Ý][A-Za-zÆØÅæøåÀ-ÖØ-öø-ÿ0-9'&.\-\s]{1,80}?)(?:\s*\(|\s+har\b|[.,\n]|$)/i,
+  );
+  const prefixedCandidate = prefixed?.[1]?.trim();
+  if (prefixedCandidate && prefixedCandidate.length >= 2) return prefixedCandidate;
   return null;
 }
 
@@ -740,6 +745,7 @@ const ENDPOINT_CONTRACTS: EndpointContract[] = [
   { basePath: "/customer", entity: "customer", methods: ["GET", "POST", "PUT"], idPathRequiredFor: ["PUT"] },
   { basePath: "/product", entity: "product", methods: ["GET", "POST"] },
   { basePath: "/invoice", entity: "invoice", methods: ["GET", "POST"] },
+  { basePath: "/invoice/paymentType", entity: "invoice", methods: ["GET"] },
   { basePath: "/order", entity: "order", methods: ["GET", "POST"] },
   {
     basePath: "/travelExpense",
@@ -760,10 +766,22 @@ const ENDPOINT_CONTRACTS: EndpointContract[] = [
 ];
 
 const ACTION_ENDPOINT_CONTRACTS: EndpointContract[] = [
-  { basePath: "/invoice", entity: "invoice", methods: ["POST"], actionName: "payment", idPathRequiredFor: ["POST"] },
-  { basePath: "/invoice", entity: "invoice", methods: ["POST"], actionName: "createCreditNote", idPathRequiredFor: ["POST"] },
-  { basePath: "/order", entity: "order", methods: ["POST"], actionName: "invoice", idPathRequiredFor: ["POST"] },
-  { basePath: "/ledger/voucher", entity: "ledger_voucher", methods: ["POST"], actionName: "reverse", idPathRequiredFor: ["POST"] },
+  { basePath: "/invoice", entity: "invoice", methods: ["POST", "PUT"], actionName: "payment", idPathRequiredFor: ["POST", "PUT"] },
+  {
+    basePath: "/invoice",
+    entity: "invoice",
+    methods: ["POST", "PUT"],
+    actionName: "createCreditNote",
+    idPathRequiredFor: ["POST", "PUT"],
+  },
+  { basePath: "/order", entity: "order", methods: ["POST", "PUT"], actionName: "invoice", idPathRequiredFor: ["POST", "PUT"] },
+  {
+    basePath: "/ledger/voucher",
+    entity: "ledger_voucher",
+    methods: ["POST", "PUT"],
+    actionName: "reverse",
+    idPathRequiredFor: ["POST", "PUT"],
+  },
 ];
 
 const ENDPOINT_CONTRACTS_BY_MATCH = [...ENDPOINT_CONTRACTS].sort((a, b) => b.basePath.length - a.basePath.length);
@@ -969,6 +987,15 @@ function isVoucherReverseActionPath(path: string): boolean {
   return /^\/ledger\/voucher\/(?:\d+|\{\{\s*[a-zA-Z0-9_.[\]]+\s*}})\/:reverse$/i.test(normalized);
 }
 
+function isActionEndpointPath(path: string): boolean {
+  return (
+    isInvoicePaymentActionPath(path) ||
+    isInvoiceCreditNoteActionPath(path) ||
+    isOrderInvoiceActionPath(path) ||
+    isVoucherReverseActionPath(path)
+  );
+}
+
 function ensurePlannerSafeQueryParams(
   method: AllowedMethod,
   path: string,
@@ -1136,7 +1163,12 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
   if (readIntent && plan.steps.some((step) => step.method !== "GET")) {
     issues.push("read-only prompt produced mutating method");
   }
-  if (createIntent && !plan.steps.some((step) => step.method === "POST")) {
+  if (
+    createIntent &&
+    !plan.steps.some(
+      (step) => step.method === "POST" || (step.method === "PUT" && isActionEndpointPath(step.path)),
+    )
+  ) {
     issues.push("create intent detected but no POST step");
   }
   if (deleteIntent && !plan.steps.some((step) => step.method === "DELETE")) {
@@ -1546,7 +1578,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         summary: "Heuristic ledger voucher reverse by id flow",
         steps: [
           {
-            method: "POST",
+            method: "PUT",
             path: `/ledger/voucher/${voucherId}/:reverse`,
             body: {
               date: todayIsoDate(),
@@ -1567,7 +1599,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
           reason: "Fetch one voucher id before reversal",
         },
         {
-          method: "POST",
+          method: "PUT",
           path: "/ledger/voucher/{{voucher_id}}/:reverse",
           body: {
             date: todayIsoDate(),
@@ -1661,7 +1693,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         summary: "Heuristic order invoice by id flow",
         steps: [
           {
-            method: "POST",
+            method: "PUT",
             path: `/order/${orderIdFromPrompt}/:invoice`,
             body: {
               invoiceDate: todayIsoDate(),
@@ -1688,7 +1720,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
           reason: "Find one order to invoice directly",
         },
         {
-          method: "POST",
+          method: "PUT",
           path: "/order/{{order_id}}/:invoice",
           body: {
             invoiceDate: todayIsoDate(),
@@ -1704,14 +1736,22 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     const amount = extractPaymentAmount(prompt);
     const paymentBody: Record<string, unknown> = {
       paymentDate: todayIsoDate(),
+      paymentTypeId: "{{invoicePaymentType_id}}",
     };
-    if (amount !== null) paymentBody.amount = amount;
+    if (amount !== null) paymentBody.paidAmount = amount;
     if (invoiceId) {
       return {
         summary: "Heuristic invoice payment by id flow",
         steps: [
           {
-            method: "POST",
+            method: "GET",
+            path: "/invoice/paymentType",
+            params: { count: 1, from: 0, fields: "id,description" },
+            saveAs: "invoicePaymentType",
+            reason: "Find one invoice payment type for payment registration",
+          },
+          {
+            method: "PUT",
             path: `/invoice/${invoiceId}/:payment`,
             body: paymentBody,
             reason: "Register payment for specific invoice",
@@ -1735,7 +1775,14 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
           reason: "Find one invoice to register payment",
         },
         {
-          method: "POST",
+          method: "GET",
+          path: "/invoice/paymentType",
+          params: { count: 1, from: 0, fields: "id,description" },
+          saveAs: "invoicePaymentType",
+          reason: "Find one invoice payment type for payment registration",
+        },
+        {
+          method: "PUT",
           path: "/invoice/{{invoice_id}}/:payment",
           body: paymentBody,
           reason: "Register payment for fetched invoice",
@@ -1745,16 +1792,17 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   }
 
   if (hasCreditNoteIntent(lower) && hasInvoiceKeyword && !deleteIntent && !readIntent) {
+    const creditComment = quoted ?? "Generated credit note";
     if (invoiceId) {
       return {
         summary: "Heuristic credit note by invoice id flow",
         steps: [
           {
-            method: "POST",
+            method: "PUT",
             path: `/invoice/${invoiceId}/:createCreditNote`,
             body: {
               date: todayIsoDate(),
-              reason: quoted ?? "Generated credit note",
+              comment: creditComment,
             },
             saveAs: "creditNote",
             reason: "Create credit note for specific invoice",
@@ -1767,22 +1815,36 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
       steps: [
         {
           method: "GET",
+          path: "/customer",
+          params: {
+            count: 1,
+            from: 0,
+            fields: "id,name,organizationNumber",
+            ...(orgNoHint ? { organizationNumber: orgNoHint } : {}),
+            ...(!orgNoHint && customerNameHint ? { name: customerNameHint } : {}),
+          },
+          saveAs: "customer",
+          reason: "Find customer referenced by the credit-note request",
+        },
+        {
+          method: "GET",
           path: "/invoice",
           params: {
             count: 1,
-            fields: "id",
+            fields: "id,customer(id,name,organizationNumber),invoiceDate,invoiceNumber",
             invoiceDateFrom: defaultEntityDateFrom(),
             invoiceDateTo: defaultEntityDateTo(),
+            customerId: "{{customer_id}}",
           },
           saveAs: "invoice",
-          reason: "Find one invoice for credit note",
+          reason: "Find one invoice for this customer to credit",
         },
         {
-          method: "POST",
+          method: "PUT",
           path: "/invoice/{{invoice_id}}/:createCreditNote",
           body: {
             date: todayIsoDate(),
-            reason: quoted ?? "Generated credit note",
+            comment: creditComment,
           },
           saveAs: "creditNote",
           reason: "Create credit note for fetched invoice",
@@ -1869,7 +1931,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         reason: "Create order with invoice product lines",
       },
       {
-        method: "POST",
+        method: "PUT",
         path: "/order/{{order_id}}/:invoice",
         body: {
           invoiceDate: todayIsoDate(),
@@ -2337,6 +2399,7 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- /customer: GET, POST, PUT (PUT requires /customer/{id})",
     "- /product: GET, POST",
     "- /invoice: GET, POST",
+    "- /invoice/paymentType: GET",
     "- /order: GET, POST",
     "- /travelExpense: GET, POST, PUT, DELETE (PUT/DELETE require /travelExpense/{id})",
     "- /project: GET, POST",
@@ -2344,10 +2407,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- /ledger/account: GET",
     "- /ledger/posting: GET",
     "- /ledger/voucher: GET, POST, DELETE (DELETE requires /ledger/voucher/{id})",
-    "- /invoice/{id}/:payment: POST",
-    "- /invoice/{id}/:createCreditNote: POST",
-    "- /order/{id}/:invoice: POST",
-    "- /ledger/voucher/{id}/:reverse: POST",
+    "- /invoice/{id}/:payment: PUT (POST may be used by some proxies; use whichever works without errors)",
+    "- /invoice/{id}/:createCreditNote: PUT (POST may be used by some proxies)",
+    "- /order/{id}/:invoice: PUT (POST may be used by some proxies)",
+    "- /ledger/voucher/{id}/:reverse: PUT (POST may be used by some proxies)",
     "",
     "REQUIRED QUERY PARAMS FOR LIST CALLS:",
     "- GET /ledger/posting: dateFrom, dateTo (YYYY-MM-DD)",
@@ -2369,10 +2432,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- perDiemCompensations item: { count, rate } — optional: location",
     "- costs item: { comments, amountCurrencyIncVat, date, paymentType: { id, description } }",
     "- POST /ledger/voucher: { date (YYYY-MM-DD), description } — optional: postings: [{ amount, account: { id } }]",
-    "- POST /invoice/{id}/:payment: { paymentDate (YYYY-MM-DD) } — optional: amount",
-    "- POST /invoice/{id}/:createCreditNote: { date (YYYY-MM-DD) } — optional: reason",
-    "- POST /order/{id}/:invoice: {} — optional: invoiceDate",
-    "- POST /ledger/voucher/{id}/:reverse: { date (YYYY-MM-DD) } — optional: description",
+    "- PUT /invoice/{id}/:payment: paymentDate, paymentTypeId, paidAmount (typically query params; body may be used by some proxies)",
+    "- PUT /invoice/{id}/:createCreditNote: date — optional: comment (typically query params)",
+    "- PUT /order/{id}/:invoice: invoiceDate (typically query params)",
+    "- PUT /ledger/voucher/{id}/:reverse: date — optional: description (typically query params)",
     "",
     "REQUIRED BODY FIELDS FOR PUT (include id in path AND body):",
     "- PUT /employee/{id}: { id, version, firstName, lastName } — fetch first with GET to get id+version",
@@ -2647,7 +2710,7 @@ function withPreflightBodyDefaults(
     changed = true;
   };
 
-  if (method === "PUT") {
+  if (method === "PUT" && !isActionEndpointPath(normalizedPath)) {
     const idMatch = path.match(/\/(\d+)\s*$/);
     if (idMatch?.[1] && !hasValue(next.id)) {
       next.id = Number(idMatch[1]);
@@ -2687,17 +2750,32 @@ function withPreflightBodyDefaults(
   const orderId = firstIdFromVars(vars, ["order_id", "orderId", "order"]);
   const departmentId = firstIdFromVars(vars, ["department_id", "departmentId", "department"]);
   const productId = firstIdFromVars(vars, ["product_id", "productId", "product"]);
+  const invoicePaymentTypeId = firstIdFromVars(vars, ["invoicePaymentType_id", "invoicePaymentTypeId", "invoicePaymentType"]);
   const amountHint = firstNumberFromVars(vars, ["milestone_amount", "invoice_amount", "amount"]);
 
   if (isInvoicePaymentActionPath(normalizedPath)) {
     setIfMissing("paymentDate", todayIsoDate());
-    if (!hasValue(next.amount) && hasValue(amountHint)) {
-      next.amount = amountHint;
+    if (!hasValue(next.paidAmount) && hasValue(next.amount)) {
+      next.paidAmount = next.amount;
+      delete next.amount;
+      changed = true;
+    }
+    if (!hasValue(next.paidAmount) && hasValue(amountHint)) {
+      next.paidAmount = amountHint;
+      changed = true;
+    }
+    if (!hasValue(next.paymentTypeId) && hasValue(invoicePaymentTypeId)) {
+      next.paymentTypeId = invoicePaymentTypeId;
       changed = true;
     }
   } else if (isInvoiceCreditNoteActionPath(normalizedPath)) {
     setIfMissing("date", todayIsoDate());
-    setIfMissing("reason", "Generated credit note");
+    setIfMissing("comment", "Generated credit note");
+    if (!hasValue(next.comment) && hasValue(next.reason)) {
+      next.comment = next.reason;
+      delete next.reason;
+      changed = true;
+    }
   } else if (isOrderInvoiceActionPath(normalizedPath)) {
     setIfMissing("invoiceDate", todayIsoDate());
   } else if (isVoucherReverseActionPath(normalizedPath)) {
@@ -2970,6 +3048,16 @@ function normalizeHydrationAlias(alias: string): string {
   ) {
     return "travelExpensePaymentType";
   }
+  if (
+    [
+      "invoicepaymenttype",
+      "invoicepaymenttypes",
+      "paymenttypeinvoice",
+      "paymenttypeinvoices",
+    ].includes(lower)
+  ) {
+    return "invoicePaymentType";
+  }
   return alias;
 }
 
@@ -3174,6 +3262,8 @@ async function ensureTemplateVariable(
     await fetchOrCreateDepartmentId(client, vars, allowCreate);
   } else if (hydrationAlias === "travelExpensePaymentType") {
     await fetchTravelExpensePaymentType(client, vars);
+  } else if (hydrationAlias === "invoicePaymentType") {
+    await fetchInvoicePaymentType(client, vars);
   }
 
   mirrorAliasId(vars, hydrationAlias, alias);
@@ -3199,6 +3289,17 @@ function cacheTravelExpensePaymentType(
   vars.travelExpensePaymentType_id = id;
   vars.travelExpensePaymentType_description = description;
   vars.travelExpensePaymentType = { id, description };
+}
+
+function cacheInvoicePaymentType(
+  vars: Record<string, unknown>,
+  id: unknown,
+  description: string,
+): void {
+  if (!hasValue(id) || !hasValue(description)) return;
+  vars.invoicePaymentType_id = id;
+  vars.invoicePaymentType_description = description;
+  vars.invoicePaymentType = { id, description };
 }
 
 async function fetchTravelExpensePaymentType(
@@ -3234,6 +3335,45 @@ async function fetchTravelExpensePaymentType(
     const description = extractDescriptionFromVarValue(primary);
     if (!hasValue(id) || !hasValue(description)) return undefined;
     cacheTravelExpensePaymentType(vars, id, description as string);
+    return { id, description: description as string };
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchInvoicePaymentType(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+): Promise<{ id: unknown; description: string } | undefined> {
+  const cachedIdValue = firstIdFromVars(vars, [
+    "invoicePaymentType_id",
+    "invoicePaymentTypeId",
+    "invoicePaymentType.id",
+    "invoicePaymentType",
+  ]);
+  const cachedDescription = firstDescriptionFromVars(vars, [
+    "invoicePaymentType_description",
+    "invoicePaymentTypeDescription",
+    "invoicePaymentType.description",
+    "invoicePaymentType",
+  ]);
+  if (hasValue(cachedIdValue) && hasValue(cachedDescription)) {
+    return { id: cachedIdValue, description: cachedDescription as string };
+  }
+
+  try {
+    const fetched = await client.request("GET", "/invoice/paymentType", {
+      params: {
+        count: 1,
+        from: 0,
+        fields: "id,description",
+      },
+    });
+    const primary = primaryValue(fetched);
+    const id = extractIdFromVarValue(primary);
+    const description = extractDescriptionFromVarValue(primary);
+    if (!hasValue(id) || !hasValue(description)) return undefined;
+    cacheInvoicePaymentType(vars, id, description as string);
     return { id, description: description as string };
   } catch {
     return undefined;
@@ -3589,6 +3729,10 @@ async function enrichVarsForValidationRetry(
     roots.has("paymentTypeId") ||
     roots.has("costs") ||
     roots.has("cost");
+  const needsInvoicePaymentType =
+    roots.has("paymentTypeId") ||
+    roots.has("paidAmount") ||
+    isInvoicePaymentActionPath(normalizedPath);
   const needsVoucher =
     roots.has("voucher") ||
     roots.has("voucherId") ||
@@ -3602,6 +3746,7 @@ async function enrichVarsForValidationRetry(
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
   if (needsVoucher) await fetchOrCreateVoucherId(client, vars);
   if (needsTravelExpensePaymentType) await fetchTravelExpensePaymentType(client, vars);
+  if (needsInvoicePaymentType) await fetchInvoicePaymentType(client, vars);
 }
 
 function withValidationFieldDefaults(
@@ -3720,10 +3865,26 @@ function withValidationFieldDefaults(
       case "paymentType":
       case "paymentTypeId":
       case "costs": {
-        const patched = withTravelExpensePaymentTypeDefaults(next, vars);
-        if (patched.changed) {
-          next.costs = patched.body.costs;
-          changed = true;
+        if (isInvoicePaymentActionPath(normalizedPath)) {
+          const invoicePaymentTypeId = firstIdFromVars(vars, [
+            "invoicePaymentType_id",
+            "invoicePaymentTypeId",
+            "invoicePaymentType",
+          ]);
+          if (!hasValue(next.paymentTypeId) && hasValue(invoicePaymentTypeId)) {
+            next.paymentTypeId = invoicePaymentTypeId;
+            changed = true;
+          }
+          if (!hasValue(next.paidAmount) && hasValue(amountHint)) {
+            next.paidAmount = amountHint;
+            changed = true;
+          }
+        } else {
+          const patched = withTravelExpensePaymentTypeDefaults(next, vars);
+          if (patched.changed) {
+            next.costs = patched.body.costs;
+            changed = true;
+          }
         }
         break;
       }
@@ -3828,6 +3989,67 @@ function formatPlanStepError(error: unknown): string {
   return String(error);
 }
 
+function isMethodNotAllowedError(error: unknown): boolean {
+  if (!(error instanceof TripletexError)) return false;
+  if (error.statusCode === 405) return true;
+  if (error.statusCode !== 400) return false;
+  const body = error.responseBody as Record<string, unknown> | undefined;
+  const message = `${String(body?.message ?? "")} ${String(body?.developerMessage ?? "")}`.toLowerCase();
+  return message.includes("405 method not allowed") || message.includes("method not allowed");
+}
+
+function prepareActionRequest(
+  method: AllowedMethod,
+  path: string,
+  params: Record<string, unknown>,
+  body: unknown,
+): { method: AllowedMethod; params: Record<string, unknown>; body: unknown } {
+  if (method === "GET" || !isActionEndpointPath(path)) {
+    return { method, params, body };
+  }
+
+  const nextParams = { ...(params ?? {}) };
+  let nextBody = body;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const bodyRecord = toRecord(body);
+    for (const [key, value] of Object.entries(bodyRecord)) {
+      if (value === undefined || value === null) continue;
+      if (nextParams[key] === undefined || nextParams[key] === null || String(nextParams[key]).trim() === "") {
+        nextParams[key] = value;
+      }
+    }
+    nextBody = undefined;
+  }
+
+  // Tripletex action endpoints are PUT in OpenAPI. Some challenge proxies may accept POST,
+  // so we prefer PUT and retry with POST when method mismatch occurs.
+  let nextMethod = method;
+  if (nextMethod === "POST") nextMethod = "PUT";
+
+  if (isInvoicePaymentActionPath(path)) {
+    if (!hasValue(nextParams.paidAmount) && hasValue(nextParams.amount)) {
+      nextParams.paidAmount = nextParams.amount;
+      delete nextParams.amount;
+    }
+    if (!hasValue(nextParams.paymentTypeId) && hasValue(nextParams.paymentType)) {
+      nextParams.paymentTypeId = nextParams.paymentType;
+      delete nextParams.paymentType;
+    }
+  }
+  if (isInvoiceCreditNoteActionPath(path)) {
+    if (!hasValue(nextParams.comment) && hasValue(nextParams.reason)) {
+      nextParams.comment = nextParams.reason;
+      delete nextParams.reason;
+    }
+  }
+
+  return {
+    method: nextMethod,
+    params: nextParams,
+    body: nextBody,
+  };
+}
+
 export async function executePlan(
   client: TripletexClient,
   plan: ExecutionPlan,
@@ -3896,13 +4118,23 @@ export async function executePlan(
       } else {
         const maxValidationRetries = Math.max(0, Number(process.env.TRIPLETEX_VALIDATION_RETRIES || "3"));
         let validationRetryRounds = 0;
+        let actionMethodRetryRounds = 0;
         let latestRetryFields: string[] = [];
         let latestRemovedFields: string[] = [];
+        const preparedAction = prepareActionRequest(
+          step.method,
+          path,
+          (params ?? {}) as Record<string, unknown>,
+          body,
+        );
+        let requestMethod: AllowedMethod = preparedAction.method;
+        let requestParams: Record<string, unknown> = preparedAction.params;
+        let requestBody: unknown = preparedAction.body;
         while (true) {
           try {
-            response = await client.request(step.method, path, {
-              params: (params ?? {}) as Record<string, unknown>,
-              body,
+            response = await client.request(requestMethod, path, {
+              params: requestParams,
+              body: requestBody,
             });
             if (validationRetryRounds > 0) {
               trace?.({
@@ -3916,6 +4148,11 @@ export async function executePlan(
             }
             break;
           } catch (error) {
+            if (isActionEndpointPath(path) && isMethodNotAllowedError(error) && actionMethodRetryRounds < 1) {
+              requestMethod = requestMethod === "PUT" ? "POST" : "PUT";
+              actionMethodRetryRounds += 1;
+              continue;
+            }
             const retryFields = validationFieldsFromError(error);
             let forcedRetry = false;
             if (retryFields.length === 0) {
@@ -3932,8 +4169,8 @@ export async function executePlan(
             if (retryFields.length > 0) {
               await enrichVarsForValidationRetry(client, vars, path, retryFields);
             }
-            const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
-            const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
+            const sanitized = withUnknownFieldRemovals(requestMethod, requestBody, mappingFields);
+            const repaired = withValidationFieldDefaults(requestMethod, path, sanitized.body, vars, retryFields);
             const shouldRetry = forcedRetry || sanitized.changed || repaired.changed;
             if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
             if (validationRetryRounds >= maxValidationRetries) throw error;
@@ -3949,7 +4186,16 @@ export async function executePlan(
               removedFields: sanitized.removedFields,
               error: error instanceof Error ? error.message : String(error),
             });
-            body = repaired.body;
+            requestBody = repaired.body;
+            const refreshedAction = prepareActionRequest(
+              requestMethod,
+              path,
+              requestParams,
+              requestBody,
+            );
+            requestMethod = refreshedAction.method;
+            requestParams = refreshedAction.params;
+            requestBody = refreshedAction.body;
           }
         }
       }

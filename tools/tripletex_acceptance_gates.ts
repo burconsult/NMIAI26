@@ -22,6 +22,7 @@ const CONTRACT_CASES: ContractCase[] = [
   { basePath: "/customer", entityPrompt: "customer", methods: ["GET", "POST", "PUT"], idPathRequiredFor: ["PUT"] },
   { basePath: "/product", entityPrompt: "product", methods: ["GET", "POST"] },
   { basePath: "/invoice", entityPrompt: "invoice", methods: ["GET", "POST"] },
+  { basePath: "/invoice/paymentType", entityPrompt: "invoice payment type", methods: ["GET"] },
   { basePath: "/order", entityPrompt: "order", methods: ["GET", "POST"] },
   {
     basePath: "/travelExpense",
@@ -34,21 +35,21 @@ const CONTRACT_CASES: ContractCase[] = [
   { basePath: "/ledger/account", entityPrompt: "ledger account", methods: ["GET"] },
   { basePath: "/ledger/posting", entityPrompt: "ledger posting", methods: ["GET"] },
   { basePath: "/ledger/voucher", entityPrompt: "ledger voucher", methods: ["GET", "POST", "DELETE"], idPathRequiredFor: ["DELETE"] },
-  { basePath: "/invoice", actionName: "payment", entityPrompt: "invoice payment", methods: ["POST"], idPathRequiredFor: ["POST"] },
+  { basePath: "/invoice", actionName: "payment", entityPrompt: "invoice payment", methods: ["POST", "PUT"], idPathRequiredFor: ["POST", "PUT"] },
   {
     basePath: "/invoice",
     actionName: "createCreditNote",
     entityPrompt: "invoice credit note",
-    methods: ["POST"],
-    idPathRequiredFor: ["POST"],
+    methods: ["POST", "PUT"],
+    idPathRequiredFor: ["POST", "PUT"],
   },
-  { basePath: "/order", actionName: "invoice", entityPrompt: "order invoice", methods: ["POST"], idPathRequiredFor: ["POST"] },
+  { basePath: "/order", actionName: "invoice", entityPrompt: "order invoice", methods: ["POST", "PUT"], idPathRequiredFor: ["POST", "PUT"] },
   {
     basePath: "/ledger/voucher",
     actionName: "reverse",
     entityPrompt: "ledger voucher reverse",
-    methods: ["POST"],
-    idPathRequiredFor: ["POST"],
+    methods: ["POST", "PUT"],
+    idPathRequiredFor: ["POST", "PUT"],
   },
 ];
 
@@ -84,7 +85,7 @@ function sampleExecutionBody(
 ): Record<string, unknown> | undefined {
   if (method !== "POST" && method !== "PUT") return undefined;
   if (caseDef.actionName === "payment") {
-    return { paymentDate: "2026-03-19", amount: 10 };
+    return { paymentDate: "2026-03-19", paymentTypeId: 1, paidAmount: 10 };
   }
   if (caseDef.actionName === "createCreditNote") {
     return { date: "2026-03-19", reason: "Gate credit note" };
@@ -192,6 +193,9 @@ async function runGates(): Promise<void> {
           return jsonResponse(201, { value: { id: 9000 + calls.length, version: 1 } });
         }
         if (method === "PUT") {
+          if (path.includes("/:")) {
+            return jsonResponse(200, { value: { id: 9000 + calls.length, version: 1 } });
+          }
           const putBody = (body ?? {}) as Record<string, unknown>;
           if (putBody.id === undefined || putBody.version === undefined) {
             return jsonResponse(422, {
@@ -272,6 +276,59 @@ async function runGates(): Promise<void> {
       };
       const issues = validatePlanForPrompt("List one invoice without modifying anything", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "executePlan retries action endpoints with PUT and maps body fields to query params",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; query: Record<string, string>; body: unknown }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path: url.pathname, query, body });
+        if (method === "PUT" && url.pathname === "/invoice/123/:payment") {
+          return jsonResponse(200, { value: { id: 1 } });
+        }
+        if (method === "POST" && url.pathname === "/invoice/123/:payment") {
+          return jsonResponse(400, { status: 400, message: "HTTP 405 Method Not Allowed" });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "action method + query mapping",
+          steps: [
+            {
+              method: "POST",
+              path: "/invoice/123/:payment",
+              body: {
+                paymentDate: "2026-03-19",
+                paymentTypeId: 7,
+                paidAmount: 2500,
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+        const putCall = calls.find((call) => call.method === "PUT" && call.path === "/invoice/123/:payment");
+        assert(putCall, "expected PUT retry call for action endpoint");
+        assert.equal(putCall?.query.paymentDate, "2026-03-19");
+        assert.equal(putCall?.query.paymentTypeId, "7");
+        assert.equal(putCall?.query.paidAmount, "2500");
+        assert.equal(putCall?.body, undefined, "expected action payload to be mapped to query params");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   });
 
@@ -526,7 +583,7 @@ async function runGates(): Promise<void> {
         if (method === "GET" && path === "/invoice") {
           return jsonResponse(200, { values: [{ id: 9050 }] });
         }
-        if (method === "POST" && path === "/invoice/9050/:payment") {
+        if (method === "PUT" && path === "/invoice/9050/:payment") {
           return jsonResponse(200, { value: { id: 9051 } });
         }
         return jsonResponse(200, { value: { id: 1 } });
@@ -558,7 +615,7 @@ async function runGates(): Promise<void> {
           "expected invoice lookup before action call",
         );
         assert.equal(
-          calls.filter((call) => call.method === "POST" && call.path === "/invoice/9050/:payment").length,
+          calls.filter((call) => call.method === "PUT" && call.path === "/invoice/9050/:payment").length,
           1,
           "expected payment action to use hydrated invoice id",
         );
@@ -584,7 +641,7 @@ async function runGates(): Promise<void> {
         if (method === "GET" && path === "/ledger/voucher") {
           return jsonResponse(200, { values: [{ id: 7060 }] });
         }
-        if (method === "POST" && path === "/ledger/voucher/7060/:reverse") {
+        if (method === "PUT" && path === "/ledger/voucher/7060/:reverse") {
           return jsonResponse(200, { value: { id: 7061 } });
         }
         return jsonResponse(200, { value: { id: 1 } });
@@ -616,7 +673,7 @@ async function runGates(): Promise<void> {
           "expected voucher lookup before reverse action",
         );
         assert.equal(
-          calls.filter((call) => call.method === "POST" && call.path === "/ledger/voucher/7060/:reverse").length,
+          calls.filter((call) => call.method === "PUT" && call.path === "/ledger/voucher/7060/:reverse").length,
           1,
           "expected reverse action to use hydrated voucher id",
         );
@@ -1476,8 +1533,8 @@ async function runGates(): Promise<void> {
       });
       assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order in heuristic plan");
       assert(
-        plan.steps.some((step) => step.method === "POST" && step.path === "/order/{{order_id}}/:invoice"),
-        "expected POST /order/{{order_id}}/:invoice in heuristic plan",
+        plan.steps.some((step) => step.method === "PUT" && step.path === "/order/{{order_id}}/:invoice"),
+        "expected PUT /order/{{order_id}}/:invoice in heuristic plan",
       );
       const issues = validatePlanForPrompt("Create invoice for customer ACME", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
@@ -1672,7 +1729,7 @@ async function runGates(): Promise<void> {
           ],
         };
         await executePlan(client, plan, false);
-        const reverseCall = calls.find((call) => call.method === "POST" && call.path.endsWith("/:reverse"));
+        const reverseCall = calls.find((call) => call.method === "PUT" && call.path.endsWith("/:reverse"));
         assert(reverseCall, "expected reverse call");
         assert.equal(reverseCall?.path, "/ledger/voucher/4242/:reverse", "expected bracket path interpolation");
       } finally {
@@ -1692,8 +1749,8 @@ async function runGates(): Promise<void> {
       });
       assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order");
       assert(
-        plan.steps.some((step) => step.method === "POST" && step.path === "/order/{{order_id}}/:invoice"),
-        "expected POST /order/{{order_id}}/:invoice",
+        plan.steps.some((step) => step.method === "PUT" && step.path === "/order/{{order_id}}/:invoice"),
+        "expected PUT /order/{{order_id}}/:invoice",
       );
       const productLookups = plan.steps.filter((step) => step.method === "GET" && step.path === "/product");
       assert(productLookups.length >= 3, "expected product lookups for extracted product lines");
