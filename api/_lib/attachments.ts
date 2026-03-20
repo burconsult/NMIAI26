@@ -36,7 +36,6 @@ type DocAiConfig = {
   processorVersion?: string;
   maxFiles: number;
   maxBytesPerFile: number;
-  timeoutMs: number;
   credentials?: {
     client_email: string;
     private_key: string;
@@ -99,10 +98,6 @@ function getDocAiConfig(): DocAiConfig | null {
   const location = process.env.DOC_AI_LOCATION?.trim();
   const processorId = process.env.DOC_AI_PROCESSOR_ID?.trim();
   if (!projectId || !location || !processorId) return null;
-  const timeoutRaw = Number(process.env.DOC_AI_TIMEOUT_MS || "12000");
-  const timeoutMs = Number.isFinite(timeoutRaw)
-    ? Math.min(60000, Math.max(2000, Math.round(timeoutRaw)))
-    : 12000;
   return {
     projectId,
     location,
@@ -110,7 +105,6 @@ function getDocAiConfig(): DocAiConfig | null {
     processorVersion: process.env.DOC_AI_PROCESSOR_VERSION?.trim() || undefined,
     maxFiles: Math.max(1, Number(process.env.DOC_AI_MAX_FILES || "3")),
     maxBytesPerFile: Math.max(1024, Number(process.env.DOC_AI_MAX_BYTES_PER_FILE || `${10 * 1024 * 1024}`)),
-    timeoutMs,
     credentials: parsedCredentials
       ? {
           client_email: parsedCredentials.client_email,
@@ -156,22 +150,6 @@ async function extractWithDocumentAi(
   if (text && entityHints) return `${text}\n\nDocument fields: ${entityHints}`;
   if (text) return text;
   return entityHints;
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return await new Promise<T>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(
-      (value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      },
-    );
-  });
 }
 
 export async function summarizeAttachments(
@@ -241,11 +219,7 @@ export async function summarizeAttachments(
         sizeBytes: raw.byteLength,
       });
       try {
-        const extracted = await withTimeout(
-          extractWithDocumentAi(docAiClient, processorName, mime, raw),
-          config.timeoutMs,
-          `Document AI timeout after ${config.timeoutMs}ms`,
-        );
+        const extracted = await extractWithDocumentAi(docAiClient, processorName, mime, raw);
         docAiUsed += 1;
         summaries.push({
           filename: file.filename,

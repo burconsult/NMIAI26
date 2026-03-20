@@ -57,33 +57,22 @@ function appendTrace(
 
 function flushTrace(traceEvents: TraceRecord[], runId: string): void {
   if (!shouldLogSolveTrace() || traceEvents.length === 0) return;
-  const chunkSizeRaw = Number(process.env.TRIPLETEX_TRACE_CHUNK_SIZE || "60");
-  const chunkSize = Number.isFinite(chunkSizeRaw) ? Math.max(10, Math.min(200, Math.round(chunkSizeRaw))) : 60;
-  const totalChunks = Math.ceil(traceEvents.length / chunkSize);
-  for (let index = 0; index < totalChunks; index += 1) {
-    const start = index * chunkSize;
-    const events = traceEvents.slice(start, start + chunkSize);
-    const payload = {
-      runId,
-      eventCount: traceEvents.length,
-      chunkIndex: index + 1,
-      chunkCount: totalChunks,
-      events,
-    };
-    try {
-      console.info(`tripletex_trace ${JSON.stringify(payload)}`);
-    } catch {
-      console.info(
-        `tripletex_trace ${JSON.stringify({
-          runId,
-          event: "trace.flush_failed",
-          at: new Date().toISOString(),
-          chunkIndex: index + 1,
-          chunkCount: totalChunks,
-          note: "trace_payload_not_serializable",
-        })}`,
-      );
-    }
+  const payload = {
+    runId,
+    eventCount: traceEvents.length,
+    events: traceEvents,
+  };
+  try {
+    console.info(`tripletex_trace ${JSON.stringify(payload)}`);
+  } catch {
+    console.info(
+      `tripletex_trace ${JSON.stringify({
+        runId,
+        event: "trace.flush_failed",
+        at: new Date().toISOString(),
+        note: "trace_payload_not_serializable",
+      })}`,
+    );
   }
 }
 
@@ -268,7 +257,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const payload = parsed.data;
     appendTrace(traceEvents, runId, "solve.validation_passed", {
-      prompt: payload.prompt.slice(0, 500),
       promptLength: payload.prompt.length,
       fileCount: payload.files.length,
       baseUrlHost: new URL(payload.tripletex_credentials.base_url).host,
@@ -277,7 +265,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const client = new TripletexClient({
       baseUrl: payload.tripletex_credentials.base_url,
       sessionToken: payload.tripletex_credentials.session_token,
-      timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "12000"),
+      timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "25000"),
       onEvent: (event) => traceTripletexCall(traceEvents, runId, event),
       logPayloads: shouldLogPayloads(),
       maxLogChars: Math.max(120, Number(process.env.TRIPLETEX_LOG_MAX_CHARS || "500")),
@@ -296,7 +284,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       })),
     });
 
-    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "2"));
+    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
     const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
     let previousError = "";
     let usedPlanner = "heuristic";
@@ -344,14 +332,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         summary: fallbackPlan.summary,
         steps: fallbackPlan.steps.length,
       });
-      const fallbackIssues = validatePlanForPrompt(payload.prompt, fallbackPlan);
-      if (fallbackIssues.length > 0) {
-        appendTrace(traceEvents, runId, "solve.heuristic_fallback_invalid", {
-          issues: fallbackIssues,
-        });
-        throw new SolveError(`Heuristic fallback plan invalid: ${fallbackIssues.join(" | ")}`);
-      }
-      usedPlanner = "heuristic";
       await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
       appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner || "heuristic" });
       res.status(200).json({ status: "completed" });
@@ -359,10 +339,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     } catch (error) {
       const debug = process.env.TRIPLETEX_DEBUG_ERRORS === "1";
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const promptPreview = payload.prompt.slice(0, 300);
       console.error("Tripletex solve error", {
         runId,
-        prompt: promptPreview,
         planner: usedPlanner,
         error: errorMessage,
         llmAttemptErrors,
@@ -377,7 +355,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             : undefined,
       });
       appendTrace(traceEvents, runId, "solve.failed", {
-        prompt: promptPreview,
         planner: usedPlanner,
         error: errorMessage,
         failHard,

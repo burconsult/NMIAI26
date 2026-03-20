@@ -25,8 +25,6 @@ export type TripletexCallLogEvent = {
   kind: "request" | "response" | "network_error";
   method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
-  attempt?: number;
-  maxAttempts?: number;
   query?: Record<string, string>;
   requestBody?: unknown;
   responseBody?: unknown;
@@ -43,8 +41,6 @@ export class TripletexClient {
   private readonly onEvent?: (event: TripletexCallLogEvent) => void;
   private readonly logPayloads: boolean;
   private readonly maxLogChars: number;
-  private readonly maxAttempts: number;
-  private readonly retryBackoffMs: number;
 
   constructor(config: TripletexClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -53,8 +49,6 @@ export class TripletexClient {
     this.onEvent = config.onEvent;
     this.logPayloads = config.logPayloads ?? false;
     this.maxLogChars = Math.max(120, config.maxLogChars ?? 500);
-    this.maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS || "2"));
-    this.retryBackoffMs = Math.max(50, Number(process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS || "250"));
   }
 
   private emit(event: TripletexCallLogEvent): void {
@@ -108,26 +102,10 @@ export class TripletexClient {
     return query;
   }
 
-  private shouldRetryStatus(statusCode: number): boolean {
-    if (statusCode >= 500) return true;
-    return statusCode === 408 || statusCode === 409 || statusCode === 425 || statusCode === 429;
-  }
-
-  private retryDelayMs(attempt: number): number {
-    const exponential = this.retryBackoffMs * 2 ** Math.max(0, attempt - 1);
-    return Math.min(4_000, exponential);
-  }
-
-  private async sleep(ms: number): Promise<void> {
-    await new Promise((resolve) => {
-      setTimeout(resolve, ms);
-    });
-  }
-
   async request(
     method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
-    options: { params?: Record<string, unknown>; body?: unknown } = {},
+  options: { params?: Record<string, unknown>; body?: unknown } = {},
   ): Promise<unknown> {
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
     const url = new URL(`${this.baseUrl}${normalizedPath}`);
@@ -140,88 +118,70 @@ export class TripletexClient {
       kind: "request",
       method,
       path: normalizedPath,
-      maxAttempts: this.maxAttempts,
       query: this.serializeQuery(url),
       requestBody: this.summarizeForLog(options.body),
     });
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-      let response: Response;
-      try {
-        response = await fetch(url.toString(), {
-          method,
-          headers: {
-            accept: "application/json",
-            authorization: this.authHeader,
-            "content-type": "application/json",
-            "user-agent": "tripletex-vercel-agent/0.1",
-          },
-          body: options.body === undefined ? undefined : JSON.stringify(options.body),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        clearTimeout(timeout);
-        this.emit({
-          kind: "network_error",
-          method,
-          path: normalizedPath,
-          attempt,
-          maxAttempts: this.maxAttempts,
-          query: this.serializeQuery(url),
-          durationMs: Date.now() - startedAt,
-          error: String(error),
-        });
-        if (attempt < this.maxAttempts) {
-          await this.sleep(this.retryDelayMs(attempt));
-          continue;
-        }
-        throw new TripletexError(`Tripletex network failure: ${String(error)}`, {
-          endpoint: `${method} ${normalizedPath}`,
-        });
-      }
-      clearTimeout(timeout);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
-      const text = await response.text();
-      let parsed: unknown = {};
-      if (text.trim().length > 0) {
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          parsed = { raw: text };
-        }
-      }
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), {
+        method,
+        headers: {
+          accept: "application/json",
+          authorization: this.authHeader,
+          "content-type": "application/json",
+          "user-agent": "tripletex-vercel-agent/0.1",
+        },
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeout);
       this.emit({
-        kind: "response",
+        kind: "network_error",
         method,
         path: normalizedPath,
-        attempt,
-        maxAttempts: this.maxAttempts,
         query: this.serializeQuery(url),
-        statusCode: response.status,
-        ok: response.ok,
         durationMs: Date.now() - startedAt,
-        responseBody: this.summarizeForLog(parsed),
+        error: String(error),
       });
+      throw new TripletexError(`Tripletex network failure: ${String(error)}`, {
+        endpoint: `${method} ${normalizedPath}`,
+      });
+    }
+    clearTimeout(timeout);
 
-      if (response.ok) {
-        return parsed;
+    const text = await response.text();
+    let parsed: unknown = {};
+    if (text.trim().length > 0) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { raw: text };
       }
-      if (attempt < this.maxAttempts && this.shouldRetryStatus(response.status)) {
-        await this.sleep(this.retryDelayMs(attempt));
-        continue;
-      }
+    }
+    this.emit({
+      kind: "response",
+      method,
+      path: normalizedPath,
+      query: this.serializeQuery(url),
+      statusCode: response.status,
+      ok: response.ok,
+      durationMs: Date.now() - startedAt,
+      responseBody: this.summarizeForLog(parsed),
+    });
+
+    if (!response.ok) {
       throw new TripletexError("Tripletex API request failed", {
         statusCode: response.status,
         endpoint: `${method} ${normalizedPath}`,
         responseBody: parsed,
       });
     }
-
-    throw new TripletexError("Tripletex API request failed", {
-      endpoint: `${method} ${normalizedPath}`,
-    });
+    return parsed;
   }
 }
 
