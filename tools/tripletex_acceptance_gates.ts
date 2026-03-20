@@ -829,6 +829,89 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
+    name: "executePlan repairs missing project manager via broad employee lookup before creating employee",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") {
+          return jsonResponse(200, { values: [{ id: 8101 }] });
+        }
+        if (method === "GET" && path === "/employee") {
+          const strictLookup = Boolean(query.firstName || query.lastName || query.email);
+          if (strictLookup) return jsonResponse(200, { values: [] });
+          return jsonResponse(200, { values: [{ id: 8201 }] });
+        }
+        if (method === "POST" && path === "/project") {
+          const managerId = Number(
+            ((body as Record<string, unknown>)?.projectManager as Record<string, unknown> | undefined)?.id,
+          );
+          if (managerId !== 8201) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "projectManager.id", message: "ID-en må referere til et gyldig object." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 8301 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "project manager fallback lookup flow",
+          steps: [
+            { method: "GET", path: "/customer", params: { count: 1 }, saveAs: "customer" },
+            {
+              method: "GET",
+              path: "/employee",
+              params: { count: 1, firstName: "Oliver", lastName: "Brown", email: "oliver.brown@example.org" },
+              saveAs: "employee",
+            },
+            {
+              method: "POST",
+              path: "/project",
+              body: {
+                name: "Cloud Migration",
+                startDate: "2026-03-19",
+                customer: { id: "{{customer_id}}" },
+                projectManager: { id: "{{employee_id}}" },
+              },
+            },
+          ],
+        };
+
+        await executePlan(client, plan, false);
+
+        const projectPost = calls.find((call) => call.method === "POST" && call.path === "/project");
+        const projectBody = (projectPost?.body ?? {}) as Record<string, unknown>;
+        const manager = (projectBody.projectManager ?? {}) as Record<string, unknown>;
+        assert.equal(Number(manager.id), 8201, "expected fallback to broad employee lookup id");
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/employee").length,
+          0,
+          "expected no employee creation when broad lookup can provide manager id",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
     name: "executePlan keeps running but surfaces mutating step failures",
     run: async () => {
       const originalFetch = globalThis.fetch;

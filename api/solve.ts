@@ -195,6 +195,10 @@ function formatAttemptError(error: unknown): string {
   return stringifyUnknown(error);
 }
 
+function isMutatingExecutionFailure(error: unknown): boolean {
+  return error instanceof SolveError && error.message.startsWith("Plan execution failed on mutating steps:");
+}
+
 function validateApiKey(req: VercelRequest): boolean {
   const expected = process.env.TRIPLETEX_API_KEY?.trim();
   if (!expected) return true;
@@ -267,6 +271,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     const payload = parsed.data;
+    console.info(
+      `tripletex_run_start ${JSON.stringify({
+        runId,
+        promptPreview: payload.prompt.slice(0, 220),
+        promptLength: payload.prompt.length,
+        fileCount: payload.files.length,
+      })}`,
+    );
     appendTrace(traceEvents, runId, "solve.validation_passed", {
       prompt: payload.prompt.slice(0, 500),
       promptLength: payload.prompt.length,
@@ -301,7 +313,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let previousError = "";
     let usedPlanner = "heuristic";
     const llmAttemptErrors: string[] = [];
-    const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
+    const failHard = process.env.TRIPLETEX_FAIL_HARD !== "0";
     try {
       if (!llmDisabled) {
         for (let i = 0; i < maxAttempts; i += 1) {
@@ -384,7 +396,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         llmAttemptErrors,
       });
 
-      if (!failHard) {
+      if (!failHard && !isMutatingExecutionFailure(error)) {
         appendTrace(traceEvents, runId, "solve.completed_fail_soft");
         res.status(200).json({ status: "completed" });
         return;

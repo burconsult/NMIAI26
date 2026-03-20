@@ -1659,7 +1659,6 @@ async function generatePlanObjectWithTimeout(
       generateObject({
         model: options.model as never,
         schema: llmExecutionPlanSchema,
-        temperature: 0,
         maxRetries: 0,
         abortSignal: controller.signal,
         providerOptions: options.providerOptions as never,
@@ -1876,6 +1875,13 @@ function firstNonEmptyString(...values: Array<unknown>): string | undefined {
     }
   }
   return undefined;
+}
+
+function generatedUniqueEmail(): string {
+  const suffix = `${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, "0")}`;
+  return `generated.${suffix}@example.org`;
 }
 
 function firstNumberFromVars(vars: Record<string, unknown>, candidates: string[]): number | undefined {
@@ -2389,16 +2395,32 @@ async function fetchOrCreateEmployeeId(
       // Ignore and try create fallback.
     }
   }
+  // For project-manager and repair flows, prefer reusing an existing employee over creating
+  // a new one that may be invalid for project assignment in this tenant.
+  try {
+    const broad = await client.request("GET", "/employee", {
+      params: buildListParams("/employee", { fields: "id", count: 1 }),
+    });
+    const broadId = extractIdFromVarValue(primaryValue(broad));
+    if (hasValue(broadId)) {
+      cacheId(vars, "employee", broadId);
+      return broadId;
+    }
+  } catch {
+    // Ignore and continue with create fallback.
+  }
   const departmentId = await fetchOrCreateDepartmentId(client, vars, true);
   const firstNameHint = firstNonEmptyString(lookup.firstName);
   const lastNameHint = firstNonEmptyString(lookup.lastName);
   const emailHint = firstNonEmptyString(lookup.email);
   const fallbackPerson = splitPersonName(firstNonEmptyString(lookup.name, lookup.fullName, lookup.employeeName) ?? null);
-  const fallbackEmail = `generated.${Date.now().toString().slice(-6)}@example.org`;
+  const fallbackEmail = generatedUniqueEmail();
   const emailCandidates = preferCreate
-    ? [emailHint, fallbackEmail].filter((value, index, all): value is string => Boolean(value) && all.indexOf(value) === index)
+    ? [emailHint, fallbackEmail].filter(
+        (value, index, all): value is string => Boolean(value) && all.indexOf(value) === index,
+      )
     : emailHint
-      ? [emailHint]
+      ? [emailHint, fallbackEmail]
       : [];
   const candidateSet = emailCandidates.length > 0 ? emailCandidates : [undefined];
   for (const candidateEmail of candidateSet) {
