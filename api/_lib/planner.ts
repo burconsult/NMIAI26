@@ -165,6 +165,13 @@ function extractPhone(prompt: string): string | null {
   return match?.[0]?.replace(/\s+/g, " ").trim() ?? null;
 }
 
+function extractOrganizationNumber(prompt: string): string | null {
+  const orgNoMatch = prompt.match(/(?:org(?:anization)?[\s.-]*(?:n(?:o|r|umber))?|organisasjonsnummer|orgnr)[\s:.-]*(\d{9})/i);
+  if (orgNoMatch?.[1]) return orgNoMatch[1];
+  const nineDigit = prompt.match(/\b(\d{9})\b/);
+  return nineDigit?.[1] ?? null;
+}
+
 function splitPersonName(name: string | null): { firstName: string; lastName: string } {
   if (!name) {
     const suffix = Date.now().toString().slice(-6);
@@ -700,17 +707,21 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     !lower.includes("faktura")
   ) {
     const customerName = quoted ?? capitalized ?? `Generated Customer ${Date.now().toString().slice(-6)}`;
+    const customerBody: Record<string, unknown> = {
+      name: customerName,
+      isCustomer: true,
+    };
+    if (email) customerBody.email = email;
+    if (phone) customerBody.phoneNumber = phone;
+    const orgNo = extractOrganizationNumber(prompt);
+    if (orgNo) customerBody.organizationNumber = orgNo;
     return {
       summary: "Heuristic customer create flow",
       steps: [
         {
           method: "POST",
           path: "/customer",
-          body: {
-            name: customerName,
-            email: email ?? undefined,
-            isCustomer: true,
-          },
+          body: customerBody,
           saveAs: "customer",
           reason: "Create customer from prompt fields",
         },
@@ -720,17 +731,20 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
 
   if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent && !lower.includes("travel expense") && !lower.includes("reise")) {
     const person = splitPersonName(quoted ?? capitalized);
+    const empBody: Record<string, unknown> = {
+      firstName: person.firstName,
+      lastName: person.lastName,
+    };
+    if (email) empBody.email = email;
+    const dateMatch = prompt.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (dateMatch?.[1]) empBody.dateOfBirth = dateMatch[1];
     return {
       summary: "Heuristic employee create flow",
       steps: [
         {
           method: "POST",
           path: "/employee",
-          body: {
-            firstName: person.firstName,
-            lastName: person.lastName,
-            email: email ?? undefined,
-          },
+          body: empBody,
           saveAs: "employee",
           reason: "Create employee from prompt fields",
         },
@@ -1441,6 +1455,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- PUT /travelExpense/{id}: { id, version } — fetch first with GET to get id+version",
     "",
     "CRITICAL RULES:",
+    "- EXTRACT EXACT VALUES from the task prompt. If the prompt says 'Create customer Nordmann AS with email info@nordmann.no',",
+    "  use name='Nordmann AS' and email='info@nordmann.no' — do NOT use placeholder or generic values.",
+    "- If the prompt mentions a name, email, phone, date, amount, or any specific value, use it EXACTLY as written.",
+    "- For employees: split the full name into firstName and lastName. 'Ola Nordmann' → firstName='Ola', lastName='Nordmann'.",
     "- Do NOT invent fields. Only use field names listed above.",
     "- Do NOT include sendType, sendTypeEmail, or any undocumented fields.",
     "- For PUT requests: always GET the entity first to obtain its current id and version number.",
@@ -1598,6 +1616,29 @@ function withPreflightBodyDefaults(
     next[key] = value;
     changed = true;
   };
+
+  if (method === "PUT") {
+    const idMatch = path.match(/\/(\d+)\s*$/);
+    if (idMatch?.[1] && !hasValue(next.id)) {
+      next.id = Number(idMatch[1]);
+      changed = true;
+    }
+    if (!hasValue(next.version)) {
+      const entityAlias = normalizedPath.replace(/^\//, "").replace(/\/.*/, "");
+      const saved = vars[entityAlias];
+      if (saved && typeof saved === "object") {
+        const savedObj = saved as Record<string, unknown>;
+        if (hasValue(savedObj.version)) {
+          next.version = savedObj.version;
+          changed = true;
+        }
+        if (!hasValue(next.id) && hasValue(savedObj.id)) {
+          next.id = savedObj.id;
+          changed = true;
+        }
+      }
+    }
+  }
 
   const customerId = firstIdFromVars(vars, ["customer_id", "customerId", "customer"]);
   const employeeId = firstIdFromVars(vars, ["employee_id", "employeeId", "employee", "projectManager_id"]);
