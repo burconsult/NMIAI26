@@ -537,6 +537,128 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
+    name: "executePlan keeps running but surfaces mutating step failures",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") return jsonResponse(200, { values: [{ id: 1001 }] });
+        if (method === "POST" && path === "/invoice") {
+          return jsonResponse(422, {
+            status: 422,
+            validationMessages: [{ field: "orders", message: "Kan ikke være tom." }],
+          });
+        }
+        if (method === "GET" && path === "/employee") return jsonResponse(200, { values: [{ id: 1002 }] });
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "continue after mutating failure but fail attempt",
+          steps: [
+            { method: "GET", path: "/customer", params: { count: 1 }, saveAs: "customer" },
+            {
+              method: "POST",
+              path: "/invoice",
+              body: {
+                customer: { id: "{{customer_id}}" },
+                invoiceDate: "2026-03-19",
+                invoiceDueDate: "2026-03-19",
+              },
+            },
+            { method: "GET", path: "/employee", params: { count: 1 } },
+          ],
+        };
+
+        let threw = false;
+        try {
+          await executePlan(client, plan, false);
+        } catch (error) {
+          threw = true;
+          const message = error instanceof Error ? error.message : String(error);
+          assert(message.includes("mutating steps"), `unexpected error: ${message}`);
+        }
+        assert(threw, "expected executePlan to throw on mutating step failure");
+        assert.equal(
+          calls.filter((call) => call.method === "GET" && call.path === "/employee").length,
+          1,
+          "expected execution to continue to subsequent steps after failure",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "executePlan resolves values.0.id template form against primary value",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") {
+          return jsonResponse(200, { values: [{ id: 1201, name: "Acme" }] });
+        }
+        if (method === "POST" && path === "/order") {
+          return jsonResponse(201, { value: { id: 1202 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "values.0.id compatibility",
+          steps: [
+            { method: "GET", path: "/customer", params: { count: 1 }, saveAs: "customer" },
+            {
+              method: "POST",
+              path: "/order",
+              body: {
+                customer: { id: "{{customer.values.0.id}}" },
+                orderDate: "2026-03-19",
+                deliveryDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const orderPost = calls.find((call) => call.method === "POST" && call.path === "/order");
+        assert(orderPost, "expected POST /order call");
+        const customer = (orderPost.body as Record<string, unknown>)?.customer as Record<string, unknown> | undefined;
+        assert.equal(customer?.id, 1201, "expected template variable customer.values.0.id to resolve to saved id");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
     name: "heuristic fallback produces valid order create flow",
     run: () => {
       const plan = heuristicPlan({

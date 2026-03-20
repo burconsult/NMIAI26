@@ -290,7 +290,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let previousError = "";
     let usedPlanner = "heuristic";
     const llmAttemptErrors: string[] = [];
-    const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
+    const failHard = process.env.TRIPLETEX_FAIL_HARD !== "0";
     try {
       if (!llmDisabled) {
         for (let i = 0; i < maxAttempts; i += 1) {
@@ -335,9 +335,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       });
       const fallbackIssues = validatePlanForPrompt(payload.prompt, fallbackPlan);
       if (fallbackIssues.length > 0) {
-        appendTrace(traceEvents, runId, "solve.heuristic_fallback_validation_warnings", {
+        appendTrace(traceEvents, runId, "solve.heuristic_fallback_invalid", {
           issues: fallbackIssues,
         });
+        throw new SolveError(`Heuristic fallback plan invalid: ${fallbackIssues.join(" | ")}`);
       }
       usedPlanner = "heuristic";
       await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(traceEvents, runId, event));

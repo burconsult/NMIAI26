@@ -69,6 +69,22 @@ function extractIdFromVarValue(value: unknown): unknown {
   return undefined;
 }
 
+function extractVersionFromVarValue(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const object = value as Record<string, unknown>;
+  if (object.version !== undefined) return object.version;
+  if (object.value && typeof object.value === "object" && (object.value as Record<string, unknown>).version !== undefined) {
+    return (object.value as Record<string, unknown>).version;
+  }
+  if (Array.isArray(object.values) && object.values.length > 0) {
+    const first = object.values[0];
+    if (first && typeof first === "object" && (first as Record<string, unknown>).version !== undefined) {
+      return (first as Record<string, unknown>).version;
+    }
+  }
+  return undefined;
+}
+
 function resolveVarRoot(vars: Record<string, unknown>, name: string): unknown {
   if (name in vars) return vars[name];
 
@@ -104,8 +120,26 @@ function resolveVar(vars: Record<string, unknown>, expr: string): unknown {
   const subPath = rest.join(".");
   const resolved = dig(base, subPath);
   if (resolved !== undefined) return resolved;
+  // Common LLM pattern: alias.values.0.id even when alias was normalized to primary value.
+  if (subPath === "values.0.id" || subPath === "value.id") {
+    const derived = extractIdFromVarValue(base);
+    if (derived !== undefined) return derived;
+  }
+  // Compatibility shim: treat the base as if it were still wrapped.
+  if (subPath.startsWith("value.")) {
+    const wrappedResolved = dig({ value: base }, subPath);
+    if (wrappedResolved !== undefined) return wrappedResolved;
+  }
+  if (subPath.startsWith("values.0.")) {
+    const wrappedResolved = dig({ values: [base] }, subPath);
+    if (wrappedResolved !== undefined) return wrappedResolved;
+  }
   if (subPath === "id") {
     const derived = extractIdFromVarValue(base);
+    if (derived !== undefined) return derived;
+  }
+  if (subPath === "version") {
+    const derived = extractVersionFromVarValue(base);
     if (derived !== undefined) return derived;
   }
   return undefined;
@@ -1439,7 +1473,7 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- All list GETs: include count (usually 1) and from (usually 0)",
     "",
     "REQUIRED BODY FIELDS FOR POST (use ONLY these field names):",
-    "- POST /employee: { firstName, lastName } — optional: email, dateOfBirth, employmentDate",
+    "- POST /employee: { firstName, lastName } — optional: email, dateOfBirth",
     "- POST /customer: { name, isCustomer: true } — optional: email, phoneNumber, organizationNumber",
     "- POST /product: { name } — optional: number, costExcludingVatCurrency, priceExcludingVatCurrency",
     "- POST /department: { name } — optional: departmentNumber",
@@ -1625,15 +1659,27 @@ function withPreflightBodyDefaults(
     }
     if (!hasValue(next.version)) {
       const entityAlias = normalizedPath.replace(/^\//, "").replace(/\/.*/, "");
-      const saved = vars[entityAlias];
+      const canonicalEntityAlias = canonicalVarName(entityAlias);
+      let saved: unknown = vars[entityAlias];
+      if (!(saved && typeof saved === "object")) {
+        for (const [key, value] of Object.entries(vars)) {
+          if (key.endsWith("_lookup_path") || key.endsWith("_lookup_params")) continue;
+          if (!value || typeof value !== "object") continue;
+          if (canonicalVarName(key).includes(canonicalEntityAlias)) {
+            saved = value;
+            break;
+          }
+        }
+      }
       if (saved && typeof saved === "object") {
-        const savedObj = saved as Record<string, unknown>;
-        if (hasValue(savedObj.version)) {
-          next.version = savedObj.version;
+        const savedVersion = extractVersionFromVarValue(saved);
+        const savedId = extractIdFromVarValue(saved);
+        if (hasValue(savedVersion)) {
+          next.version = savedVersion;
           changed = true;
         }
-        if (!hasValue(next.id) && hasValue(savedObj.id)) {
-          next.id = savedObj.id;
+        if (!hasValue(next.id) && hasValue(savedId)) {
+          next.id = savedId;
           changed = true;
         }
       }
@@ -2220,7 +2266,7 @@ export async function executePlan(
   const vars: Record<string, unknown> = {};
   let count = 0;
   let successCount = 0;
-  let lastError: unknown = null;
+  const failedSteps: Array<{ step: number; method: AllowedMethod; path: string; error: string }> = [];
 
   for (const rawStep of plan.steps) {
     const step = rawStep as PlanStep;
@@ -2346,7 +2392,12 @@ export async function executePlan(
         }
       }
     } catch (stepError) {
-      lastError = stepError;
+      failedSteps.push({
+        step: count,
+        method: step.method,
+        path: String(step.path),
+        error: stepError instanceof Error ? stepError.message : String(stepError),
+      });
       trace?.({
         event: "plan_step_end",
         step: count,
@@ -2357,8 +2408,22 @@ export async function executePlan(
     }
   }
 
-  if (successCount === 0 && lastError) {
-    throw lastError;
+  if (failedSteps.length > 0) {
+    const mutatingFailures = failedSteps.filter((item) => item.method !== "GET");
+    if (mutatingFailures.length > 0) {
+      const summary = mutatingFailures
+        .slice(0, 3)
+        .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
+        .join(" | ");
+      throw new SolveError(`Plan execution failed on mutating steps: ${summary}`);
+    }
+    if (successCount === 0) {
+      const summary = failedSteps
+        .slice(0, 3)
+        .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
+        .join(" | ");
+      throw new SolveError(`Plan execution failed: ${summary}`);
+    }
   }
   return count;
 }
