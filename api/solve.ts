@@ -321,7 +321,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let previousError = "";
     let usedPlanner = "heuristic";
     const llmAttemptErrors: string[] = [];
-    const failHard = process.env.TRIPLETEX_FAIL_HARD !== "0";
+    const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
     try {
       if (!llmDisabled) {
         for (let i = 0; i < maxAttempts; i += 1) {
@@ -411,7 +411,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       });
 
       const mutatingFailure = isMutatingExecutionFailure(error);
-      if (!failHard && !mutatingFailure) {
+      if (!failHard) {
         appendTrace(traceEvents, runId, "solve.completed_fail_soft", {
           error: errorMessage,
           mutatingFailure,
