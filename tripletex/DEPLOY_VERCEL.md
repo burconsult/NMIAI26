@@ -15,9 +15,10 @@ This project uses Vercel serverless functions:
 
 - `AI_GATEWAY_API_KEY` (required outside Vercel runtime; on Vercel the gateway can also use OIDC)
 - `TRIPLETEX_API_KEY` (optional but recommended)
-- `TRIPLETEX_LLM_ATTEMPTS` (optional, default `3`)
-- `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `25000`)
-- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (optional, default `3`; retries transient network/5xx/429 errors)
+- `TRIPLETEX_LLM_ATTEMPTS` (optional, default `2`)
+- `TRIPLETEX_LLM_TIMEOUT_MS` (optional, default `18000`; hard timeout per LLM planning call)
+- `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `12000`)
+- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (optional, default `2`; retries transient network/5xx/429 errors)
 - `TRIPLETEX_HTTP_RETRY_BACKOFF_MS` (optional, default `250`; exponential backoff base in ms)
 - `TRIPLETEX_VALIDATION_RETRIES` (optional, default `3`; per-step 422 repair retry rounds)
 - `TRIPLETEX_EMPLOYEE_USER_TYPE` (optional, default `STANDARD`; fallback user type for employee create/update repairs)
@@ -51,6 +52,7 @@ Optional Google Document AI extraction (recommended for PDFs/images):
 - `DOC_AI_PROCESSOR_VERSION` (optional)
 - `DOC_AI_MAX_FILES` (optional, default `3`)
 - `DOC_AI_MAX_BYTES_PER_FILE` (optional, default `10485760`)
+- `DOC_AI_TIMEOUT_MS` (optional, default `12000`; hard timeout per OCR call)
 - `DOC_AI_CREDENTIALS_JSON` (recommended on Vercel; full service-account JSON)
 
 Your current OCR processor values:
@@ -80,4 +82,5 @@ When registering your challenge endpoint:
 ```bash
 npm run typecheck
 npx tsx tools/tripletex_acceptance_gates.ts
+bash tools/test_models_live.sh
 ```

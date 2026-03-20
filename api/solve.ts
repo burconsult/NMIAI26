@@ -266,7 +266,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const client = new TripletexClient({
       baseUrl: payload.tripletex_credentials.base_url,
       sessionToken: payload.tripletex_credentials.session_token,
-      timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "25000"),
+      timeoutMs: Number(process.env.TRIPLETEX_HTTP_TIMEOUT_MS || "12000"),
       onEvent: (event) => traceTripletexCall(traceEvents, runId, event),
       logPayloads: shouldLogPayloads(),
       maxLogChars: Math.max(120, Number(process.env.TRIPLETEX_LOG_MAX_CHARS || "500")),
@@ -285,7 +285,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       })),
     });
 
-    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
+    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "2"));
     const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
     let previousError = "";
     let usedPlanner = "heuristic";

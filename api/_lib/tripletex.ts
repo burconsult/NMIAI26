@@ -53,7 +53,7 @@ export class TripletexClient {
     this.onEvent = config.onEvent;
     this.logPayloads = config.logPayloads ?? false;
     this.maxLogChars = Math.max(120, config.maxLogChars ?? 500);
-    this.maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS || "3"));
+    this.maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS || "2"));
     this.retryBackoffMs = Math.max(50, Number(process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS || "250"));
   }
 

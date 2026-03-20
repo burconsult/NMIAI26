@@ -61,6 +61,22 @@ function sampleBody(basePath: string): Record<string, unknown> {
   }
 }
 
+function sampleExecutionBody(
+  basePath: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+): Record<string, unknown> | undefined {
+  if (method !== "POST" && method !== "PUT") return undefined;
+  const base = sampleBody(basePath);
+  if (method === "PUT") {
+    return {
+      ...base,
+      id: 123,
+      version: 1,
+    };
+  }
+  return base;
+}
+
 function getPromptForMethod(entityPrompt: string, method: "GET" | "POST" | "PUT" | "DELETE"): string {
   if (method === "GET") return `List one ${entityPrompt} without modifying anything`;
   if (method === "POST") return `Create ${entityPrompt}`;
@@ -120,6 +136,80 @@ async function runGates(): Promise<void> {
       });
     }
   }
+
+  gates.push({
+    name: "executePlan supports full endpoint/method matrix with mocked API",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET") {
+          return jsonResponse(200, { values: [{ id: 123, version: 1, name: "Gate Entity" }] });
+        }
+        if (method === "POST") {
+          return jsonResponse(201, { value: { id: 9000 + calls.length, version: 1 } });
+        }
+        if (method === "PUT") {
+          const putBody = (body ?? {}) as Record<string, unknown>;
+          if (putBody.id === undefined || putBody.version === undefined) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "id", message: "id and version are required" }],
+            });
+          }
+          return jsonResponse(200, {
+            value: {
+              id: putBody.id,
+              version: Number(putBody.version) + 1,
+            },
+          });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+
+        for (const caseDef of CONTRACT_CASES) {
+          for (const method of caseDef.methods) {
+            const requiresIdPath = (caseDef.idPathRequiredFor ?? []).includes(method as "PUT" | "DELETE");
+            const path = requiresIdPath ? `${caseDef.basePath}/123` : caseDef.basePath;
+            const plan: ExecutionPlan = {
+              summary: `matrix ${method} ${caseDef.basePath}`,
+              steps: [
+                {
+                  method,
+                  path,
+                  params: getParamsForMethod(caseDef.basePath, method),
+                  body: sampleExecutionBody(caseDef.basePath, method),
+                },
+              ],
+            };
+            await executePlan(client, plan, false);
+          }
+        }
+
+        const expectedMinimumCalls = CONTRACT_CASES.reduce((sum, def) => sum + def.methods.length, 0);
+        assert(
+          calls.length >= expectedMinimumCalls,
+          `expected at least ${expectedMinimumCalls} calls, observed ${calls.length}`,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
 
   gates.push({
     name: "validatePlanForPrompt allows GET /order without date range (executor auto-injects)",

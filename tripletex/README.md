@@ -13,6 +13,7 @@ This folder contains the Tripletex challenge implementation and handover package
 - Tripletex API execution engine in `api/_lib/tripletex.ts`
 - Automatic 422 repair loop for common validation/mapping errors (including employee `userType`/`department` hydration)
 - Transient HTTP/network retry logic for Tripletex API calls
+- Hard timeouts on LLM planning and Document AI OCR to avoid Vercel function timeouts
 - Optional `Bearer` API-key protection via `TRIPLETEX_API_KEY`
 - Vercel rewrites `/solve` and `/health` configured in `vercel.json`
 
@@ -27,6 +28,13 @@ Health check:
 
 ```bash
 curl http://127.0.0.1:3000/health
+```
+
+Preflight simulation (run before challenge submission):
+
+```bash
+npm run acceptance:gates
+bash tools/test_models_live.sh
 ```
 
 ## Minimal Solve Request

@@ -2,6 +2,7 @@ import { generateObject } from "ai";
 import { gateway } from "@ai-sdk/gateway";
 import type { GatewayLanguageModelOptions } from "@ai-sdk/gateway";
 import { createOpenAI } from "@ai-sdk/openai";
+import { z } from "zod";
 
 import type { AttachmentSummary } from "./attachments.js";
 import type { ExecutionPlan, PlanStep, SolveRequest } from "./schemas.js";
@@ -46,6 +47,40 @@ export type PlannerTraceEvent = {
 };
 
 type PlannerTrace = (event: PlannerTraceEvent) => void;
+
+// OpenAI structured outputs require all keys to be present and avoid optional object keys.
+// This schema is used only for LLM generation; we normalize null -> undefined before runtime validation.
+const llmPlanStepSchema = z.object({
+  method: z.enum(["GET", "POST", "PUT", "DELETE"]),
+  path: z.string().min(1),
+  params: z.object({}).passthrough().nullable(),
+  body: z.object({}).passthrough().nullable(),
+  saveAs: z.string().nullable(),
+  extract: z.object({}).catchall(z.string()).nullable(),
+  reason: z.string().nullable(),
+});
+
+const llmExecutionPlanSchema = z.object({
+  summary: z.string(),
+  steps: z.array(llmPlanStepSchema).min(1).max(18),
+});
+
+type LlmExecutionPlan = z.infer<typeof llmExecutionPlanSchema>;
+
+function normalizeLlmExecutionPlan(plan: LlmExecutionPlan): ExecutionPlan {
+  return executionPlanSchema.parse({
+    summary: plan.summary || "",
+    steps: plan.steps.map((step) => ({
+      method: step.method,
+      path: step.path,
+      params: step.params ?? undefined,
+      body: step.body ?? undefined,
+      saveAs: step.saveAs ?? undefined,
+      extract: step.extract ?? undefined,
+      reason: step.reason ?? undefined,
+    })),
+  });
+}
 
 const varPattern = /\{\{\s*([a-zA-Z0-9_.]+)\s*}}/g;
 
@@ -644,8 +679,7 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
     // because the executor auto-injects them via ensurePlannerSafeQueryParams.
     // Blocking plans for missing date params wastes LLM retry attempts.
     if (step.method === "POST" || step.method === "PUT") {
-      const isTemplateString = typeof step.body === "string" && step.body.includes("{{");
-      if (step.body === undefined || step.body === null || (typeof step.body !== "object" && !isTemplateString)) {
+      if (step.body === undefined || step.body === null || typeof step.body !== "object" || Array.isArray(step.body)) {
         issues.push(`step ${stepNumber}: ${step.method} requires an object JSON body`);
       }
     }
@@ -1435,18 +1469,56 @@ function parseFallbackModels(primaryModel: string): string[] {
     process.env.TRIPLETEX_GATEWAY_FALLBACK_MODELS?.split(",")
       .map((part) => part.trim())
       .filter(Boolean) ?? [];
-  const defaults = [
-    "google/gemini-3.1-pro-preview",
-    "openai/gpt-5.4",
-    "openai/gpt-5.4-pro",
-    "anthropic/claude-sonnet-4.5",
-    "google/gemini-2.5-pro",
-  ];
+  // Keep default fallback chain short to avoid long multi-provider tail latency.
+  const defaults = primaryModel.startsWith("openai/")
+    ? ["google/gemini-3.1-pro-preview"]
+    : ["openai/gpt-5.4"];
   return [...configured, ...defaults].filter((model, index, all) => model !== primaryModel && all.indexOf(model) === index);
 }
 
 function shouldUseDirectOpenAiFallback(): boolean {
   return process.env.TRIPLETEX_ENABLE_DIRECT_OPENAI_FALLBACK === "1" && Boolean(process.env.OPENAI_API_KEY?.trim());
+}
+
+function llmCallTimeoutMs(): number {
+  const raw = Number(process.env.TRIPLETEX_LLM_TIMEOUT_MS || "18000");
+  if (!Number.isFinite(raw)) return 18000;
+  return Math.min(60000, Math.max(2000, Math.round(raw)));
+}
+
+async function generatePlanObjectWithTimeout(
+  options: {
+    model: unknown;
+    prompt: string;
+    providerOptions?: unknown;
+  },
+  timeoutMs: number,
+): Promise<LlmExecutionPlan> {
+  const controller = new AbortController();
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      controller.abort();
+      reject(new SolveError(`LLM planning timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    const generated = await Promise.race([
+      generateObject({
+        model: options.model as never,
+        schema: llmExecutionPlanSchema,
+        temperature: 0,
+        maxRetries: 0,
+        abortSignal: controller.signal,
+        providerOptions: options.providerOptions as never,
+        prompt: options.prompt,
+      }),
+      timeoutPromise,
+    ]);
+    return (generated as { object: LlmExecutionPlan }).object;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary[], previousError?: string): string {
@@ -1534,23 +1606,26 @@ export async function llmPlan(
 ): Promise<ExecutionPlan> {
   const modelName = selectPlanningModel(payload.prompt, summaries);
   const fallbackModels = parseFallbackModels(modelName);
+  const timeoutMs = llmCallTimeoutMs();
   trace?.({
     event: "llm_plan_start",
     model: modelName,
     fallbackModels,
   });
   try {
-    const { object } = await generateObject({
-      model: gateway(modelName),
-      schema: executionPlanSchema,
-      temperature: 0,
-      providerOptions: {
-        gateway: {
-          models: fallbackModels,
-        } satisfies GatewayLanguageModelOptions,
+    const rawObject = await generatePlanObjectWithTimeout(
+      {
+        model: gateway(modelName),
+        providerOptions: {
+          gateway: {
+            models: fallbackModels,
+          } satisfies GatewayLanguageModelOptions,
+        },
+        prompt: buildPlanningPrompt(payload, summaries, previousError),
       },
-      prompt: buildPlanningPrompt(payload, summaries, previousError),
-    });
+      timeoutMs,
+    );
+    const object = normalizeLlmExecutionPlan(rawObject);
     trace?.({
       event: "llm_plan_success",
       model: modelName,
@@ -1577,12 +1652,14 @@ export async function llmPlan(
       model: modelName,
       directModel,
     });
-    const { object } = await generateObject({
-      model: openai(directModel),
-      schema: executionPlanSchema,
-      temperature: 0,
-      prompt: buildPlanningPrompt(payload, summaries, `Gateway failed: ${String(error)}\n${previousError || ""}`.trim()),
-    });
+    const rawObject = await generatePlanObjectWithTimeout(
+      {
+        model: openai(directModel),
+        prompt: buildPlanningPrompt(payload, summaries, `Gateway failed: ${String(error)}\n${previousError || ""}`.trim()),
+      },
+      timeoutMs,
+    );
+    const object = normalizeLlmExecutionPlan(rawObject);
     trace?.({
       event: "llm_plan_success",
       model: directModel,

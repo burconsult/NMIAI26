@@ -196,9 +196,10 @@ Execution guard behavior:
 - `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-3.1-pro-preview`)
 - `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.4`)
 - `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated model IDs)
-- `TRIPLETEX_LLM_ATTEMPTS` (default `3`)
-- `TRIPLETEX_HTTP_TIMEOUT_MS` (default `25000`)
-- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (default `3`; retries transient Tripletex network/5xx/429 failures)
+- `TRIPLETEX_LLM_ATTEMPTS` (default `2`)
+- `TRIPLETEX_LLM_TIMEOUT_MS` (default `18000`; hard timeout per LLM planning call)
+- `TRIPLETEX_HTTP_TIMEOUT_MS` (default `12000`)
+- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (default `2`; retries transient Tripletex network/5xx/429 failures)
 - `TRIPLETEX_HTTP_RETRY_BACKOFF_MS` (default `250`; exponential backoff base for HTTP retries)
 - `TRIPLETEX_VALIDATION_RETRIES` (default `3`; per-step retries for 422 repair loops)
 - `TRIPLETEX_EMPLOYEE_USER_TYPE` (default `STANDARD`; used when employee payload is missing userType)
@@ -223,6 +224,7 @@ Optional Document AI extraction:
 - `DOC_AI_PROCESSOR_VERSION` (optional)
 - `DOC_AI_MAX_FILES` (optional)
 - `DOC_AI_MAX_BYTES_PER_FILE` (optional)
+- `DOC_AI_TIMEOUT_MS` (optional, default `12000`; hard timeout per OCR call)
 - `DOC_AI_CREDENTIALS_JSON` (service-account JSON blob, preferred for Vercel)
 
 ## 5. Local Development
@@ -246,6 +248,7 @@ Acceptance gates:
 ```bash
 npm run typecheck
 npx tsx tools/tripletex_acceptance_gates.ts
+bash tools/test_models_live.sh
 ```
 
 ## 6. Repo Split Plan (Dedicated Tripletex Repo)
@@ -307,12 +310,13 @@ Priority 3:
 - Validation failure:
   - returns `400` and logs field-level issues in trace + warning log
 - LLM planning unavailable/failing:
+  - each call bounded by `TRIPLETEX_LLM_TIMEOUT_MS`
   - retries up to `TRIPLETEX_LLM_ATTEMPTS`, then heuristic planner
 - Internal execution failure:
   - default fail-hard: returns `500` with diagnostic details (if enabled)
   - optional fail-soft mode: set `TRIPLETEX_FAIL_HARD=0` to return `200 {"status":"completed"}`
 - DocAI unavailable/misconfigured/runtime errors:
-  - non-fatal; attachment falls back to metadata extraction
+  - non-fatal; attachment falls back to metadata extraction (including timeout via `DOC_AI_TIMEOUT_MS`)
   - trace log captures failure message and fallback reason
 - Large/unparseable non-text attachments:
   - metadata fallback without blocking solve flow

@@ -20,10 +20,12 @@ export const solveRequestSchema = z.object({
 export const planStepSchema = z.object({
   method: z.enum(["GET", "POST", "PUT", "DELETE"]),
   path: z.string().min(1),
-  params: z.record(z.string(), z.any()).optional(),
-  body: z.any().optional(),
+  // Keep planner schema provider-compatible (OpenAI structured outputs reject z.record/z.any unions here).
+  params: z.object({}).passthrough().optional(),
+  body: z.object({}).passthrough().optional(),
   saveAs: z.string().optional(),
-  extract: z.record(z.string(), z.string()).optional(),
+  // Keep extract map OpenAI-compatible (avoid `propertyNames` from z.record).
+  extract: z.object({}).catchall(z.string()).optional(),
   reason: z.string().optional(),
 });
 
