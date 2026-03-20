@@ -161,7 +161,7 @@ async function runGates(): Promise<void> {
   for (const caseDef of CONTRACT_CASES) {
     for (const method of caseDef.methods) {
       gates.push({
-        name: `validatePlanForPrompt accepts ${method} ${caseDef.basePath}`,
+        name: `validatePlanForPrompt accepts ${method} ${caseDef.basePath}${caseDef.actionName ? `/:${caseDef.actionName}` : ""}`,
         run: () => {
           const plan = buildPlan(caseDef, method);
           const prompt = getPromptForMethod(caseDef.entityPrompt, method);
@@ -504,6 +504,64 @@ async function runGates(): Promise<void> {
         const orderBody = orderPosts[0]?.body as Record<string, unknown>;
         const product = orderBody?.product as Record<string, unknown> | undefined;
         assert.equal(product?.id, 702, "order should reference hydrated product id");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "executePlan hydrates missing invoice_id template for payment action",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/invoice") {
+          return jsonResponse(200, { values: [{ id: 9050 }] });
+        }
+        if (method === "POST" && path === "/invoice/9050/:payment") {
+          return jsonResponse(200, { value: { id: 9051 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "hydrate missing invoice id for payment",
+          steps: [
+            {
+              method: "POST",
+              path: "/invoice/{{invoice_id}}/:payment",
+              body: {
+                paymentDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        assert.equal(
+          calls.filter((call) => call.method === "GET" && call.path === "/invoice").length,
+          1,
+          "expected invoice lookup before action call",
+        );
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/invoice/9050/:payment").length,
+          1,
+          "expected payment action to use hydrated invoice id",
+        );
       } finally {
         globalThis.fetch = originalFetch;
       }

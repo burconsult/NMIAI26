@@ -2887,6 +2887,8 @@ async function ensureTemplateVariable(
 
   if (alias === "customer") {
     await fetchOrCreateCustomerId(client, vars);
+  } else if (alias === "invoice") {
+    await fetchOrCreateInvoiceId(client, vars);
   } else if (alias === "employee") {
     await fetchOrCreateEmployeeId(client, vars);
   } else if (alias === "order") {
@@ -3172,6 +3174,52 @@ async function fetchOrCreateOrderId(
   return undefined;
 }
 
+async function fetchOrCreateInvoiceId(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+): Promise<unknown> {
+  const existing = cachedId(vars, "invoice");
+  if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "invoice");
+  try {
+    const fetched = await client.request("GET", "/invoice", {
+      params: buildListParams("/invoice", lookup),
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      cacheId(vars, "invoice", id);
+      return id;
+    }
+  } catch {
+    // Ignore and continue with create fallback.
+  }
+
+  const orderId = await fetchOrCreateOrderId(client, vars);
+  const customerId = await fetchOrCreateCustomerId(client, vars);
+  if (!hasValue(orderId)) return undefined;
+  try {
+    const createBody: Record<string, unknown> = {
+      invoiceDate: todayIsoDate(),
+      invoiceDueDate: todayIsoDate(),
+      orders: [{ id: orderId }],
+    };
+    if (hasValue(customerId)) {
+      createBody.customer = { id: customerId };
+    }
+    const created = await client.request("POST", "/invoice", {
+      body: createBody,
+    });
+    const id = extractIdFromVarValue(primaryValue(created));
+    if (hasValue(id)) {
+      cacheId(vars, "invoice", id);
+      return id;
+    }
+  } catch {
+    // Ignore: caller will continue without injected ID.
+  }
+  return undefined;
+}
+
 async function enrichVarsForValidationRetry(
   client: TripletexClient,
   vars: Record<string, unknown>,
@@ -3199,6 +3247,12 @@ async function enrichVarsForValidationRetry(
   const needsFreshProjectManager =
     normalizedPath === "/project" && (roots.has("projectManager") || roots.has("projectManagerId"));
   const needsOrder = roots.has("order") || roots.has("orderId") || roots.has("orders") || normalizedPath === "/invoice";
+  const needsInvoice =
+    roots.has("invoice") ||
+    roots.has("invoiceId") ||
+    roots.has("paymentDate") ||
+    isInvoicePaymentActionPath(normalizedPath) ||
+    isInvoiceCreditNoteActionPath(normalizedPath);
   const needsProduct =
     roots.has("product") ||
     roots.has("productId") ||
@@ -3218,6 +3272,7 @@ async function enrichVarsForValidationRetry(
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
   if (needsEmployee) await fetchOrCreateEmployeeId(client, vars, needsFreshProjectManager);
   if (needsOrder) await fetchOrCreateOrderId(client, vars);
+  if (needsInvoice) await fetchOrCreateInvoiceId(client, vars);
   if (needsProduct) await fetchOrCreateProductId(client, vars, true);
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
   if (needsTravelExpensePaymentType) await fetchTravelExpensePaymentType(client, vars);
