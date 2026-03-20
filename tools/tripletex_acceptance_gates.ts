@@ -569,6 +569,64 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
+    name: "executePlan hydrates missing voucher_id template for reverse action",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/ledger/voucher") {
+          return jsonResponse(200, { values: [{ id: 7060 }] });
+        }
+        if (method === "POST" && path === "/ledger/voucher/7060/:reverse") {
+          return jsonResponse(200, { value: { id: 7061 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "hydrate missing voucher id for reverse",
+          steps: [
+            {
+              method: "POST",
+              path: "/ledger/voucher/{{voucher_id}}/:reverse",
+              body: {
+                date: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        assert.equal(
+          calls.filter((call) => call.method === "GET" && call.path === "/ledger/voucher").length,
+          1,
+          "expected voucher lookup before reverse action",
+        );
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/ledger/voucher/7060/:reverse").length,
+          1,
+          "expected reverse action to use hydrated voucher id",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
     name: "executePlan hydrates multiple missing template ids in same step",
     run: async () => {
       const originalFetch = globalThis.fetch;

@@ -2889,6 +2889,8 @@ async function ensureTemplateVariable(
     await fetchOrCreateCustomerId(client, vars);
   } else if (alias === "invoice") {
     await fetchOrCreateInvoiceId(client, vars);
+  } else if (alias === "voucher") {
+    await fetchOrCreateVoucherId(client, vars);
   } else if (alias === "employee") {
     await fetchOrCreateEmployeeId(client, vars);
   } else if (alias === "order") {
@@ -3220,6 +3222,68 @@ async function fetchOrCreateInvoiceId(
   return undefined;
 }
 
+async function fetchLedgerAccountId(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+): Promise<unknown> {
+  const existing = cachedId(vars, "ledgerAccount");
+  if (hasValue(existing)) return existing;
+  try {
+    const fetched = await client.request("GET", "/ledger/account", {
+      params: { count: 1, from: 0, fields: "id" },
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      cacheId(vars, "ledgerAccount", id);
+      return id;
+    }
+  } catch {
+    // Ignore and let caller fail gracefully if account is required.
+  }
+  return undefined;
+}
+
+async function fetchOrCreateVoucherId(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+): Promise<unknown> {
+  const existing = cachedId(vars, "voucher");
+  if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "voucher");
+  try {
+    const fetched = await client.request("GET", "/ledger/voucher", {
+      params: buildListParams("/ledger/voucher", lookup),
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      cacheId(vars, "voucher", id);
+      return id;
+    }
+  } catch {
+    // Ignore and continue with create fallback.
+  }
+
+  const accountId = await fetchLedgerAccountId(client, vars);
+  if (!hasValue(accountId)) return undefined;
+  try {
+    const created = await client.request("POST", "/ledger/voucher", {
+      body: {
+        date: todayIsoDate(),
+        description: "Generated voucher",
+        postings: [{ amount: 1, account: { id: accountId } }],
+      },
+    });
+    const id = extractIdFromVarValue(primaryValue(created));
+    if (hasValue(id)) {
+      cacheId(vars, "voucher", id);
+      return id;
+    }
+  } catch {
+    // Ignore: caller will continue without injected ID.
+  }
+  return undefined;
+}
+
 async function enrichVarsForValidationRetry(
   client: TripletexClient,
   vars: Record<string, unknown>,
@@ -3268,6 +3332,10 @@ async function enrichVarsForValidationRetry(
     roots.has("paymentTypeId") ||
     roots.has("costs") ||
     roots.has("cost");
+  const needsVoucher =
+    roots.has("voucher") ||
+    roots.has("voucherId") ||
+    isVoucherReverseActionPath(normalizedPath);
 
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
   if (needsEmployee) await fetchOrCreateEmployeeId(client, vars, needsFreshProjectManager);
@@ -3275,6 +3343,7 @@ async function enrichVarsForValidationRetry(
   if (needsInvoice) await fetchOrCreateInvoiceId(client, vars);
   if (needsProduct) await fetchOrCreateProductId(client, vars, true);
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
+  if (needsVoucher) await fetchOrCreateVoucherId(client, vars);
   if (needsTravelExpensePaymentType) await fetchTravelExpensePaymentType(client, vars);
 }
 
