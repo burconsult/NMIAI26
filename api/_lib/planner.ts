@@ -589,6 +589,20 @@ function hasCreditNoteIntent(lower: string): boolean {
   ].some((token) => lower.includes(token));
 }
 
+function hasOrderInvoiceIntent(lower: string): boolean {
+  return [
+    "invoice order",
+    "order invoice",
+    "fakturer ordre",
+    "fakturere ordre",
+    "facturar pedido",
+    "faturar pedido",
+    "facturer commande",
+    "rechnung fur bestellung",
+    "rechnung für bestellung",
+  ].some((token) => lower.includes(token));
+}
+
 function hasReverseIntent(lower: string): boolean {
   return [
     "reverse",
@@ -1553,7 +1567,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if (hasOrderKeyword && hasInvoiceKeyword && !deleteIntent && !readIntent) {
+  if (hasOrderInvoiceIntent(lower) && !deleteIntent && !readIntent) {
     if (orderIdFromPrompt) {
       return {
         summary: "Heuristic order invoice by id flow",
