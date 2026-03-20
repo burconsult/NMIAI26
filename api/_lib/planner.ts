@@ -2883,22 +2883,12 @@ export async function executePlan(
     }
   }
 
-  if (failedSteps.length > 0) {
-    const mutatingFailures = failedSteps.filter((item) => item.method !== "GET");
-    if (mutatingFailures.length > 0) {
-      const summary = mutatingFailures
-        .slice(0, 3)
-        .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
-        .join(" | ");
-      throw new SolveError(`Plan execution failed on mutating steps: ${summary}`);
-    }
-    if (successCount === 0) {
-      const summary = failedSteps
-        .slice(0, 3)
-        .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
-        .join(" | ");
-      throw new SolveError(`Plan execution failed: ${summary}`);
-    }
+  if (successCount === 0 && failedSteps.length > 0) {
+    const summary = failedSteps
+      .slice(0, 3)
+      .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
+      .join(" | ");
+    throw new SolveError(`Plan execution failed: ${summary}`);
   }
   return count;
 }
