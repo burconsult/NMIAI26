@@ -120,6 +120,30 @@ function extractVersionFromVarValue(value: unknown): unknown {
   return undefined;
 }
 
+function extractDescriptionFromVarValue(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const object = value as Record<string, unknown>;
+  if (typeof object.description === "string" && object.description.trim().length > 0) {
+    return object.description.trim();
+  }
+  if (object.value && typeof object.value === "object") {
+    const nested = object.value as Record<string, unknown>;
+    if (typeof nested.description === "string" && nested.description.trim().length > 0) {
+      return nested.description.trim();
+    }
+  }
+  if (Array.isArray(object.values) && object.values.length > 0) {
+    const first = object.values[0];
+    if (first && typeof first === "object") {
+      const nested = first as Record<string, unknown>;
+      if (typeof nested.description === "string" && nested.description.trim().length > 0) {
+        return nested.description.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
 function resolveVarRoot(vars: Record<string, unknown>, name: string): unknown {
   if (name in vars) return vars[name];
 
@@ -293,6 +317,135 @@ function extractProjectManagerName(prompt: string): string | null {
   return null;
 }
 
+function addDaysIso(isoDate: string, days: number): string {
+  const seed = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(seed.getTime())) return isoDate;
+  seed.setUTCDate(seed.getUTCDate() + days);
+  return seed.toISOString().slice(0, 10);
+}
+
+function extractTravelDays(prompt: string): number | null {
+  const match = prompt.match(/\b(\d{1,2})\s*(?:day|days|dager?|dias?|tage?|jours?)\b/i);
+  if (!match?.[1]) return null;
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(1, Math.min(60, Math.round(parsed)));
+}
+
+function extractPerDiemRate(prompt: string): number | null {
+  const keywordRateMatch = prompt.match(
+    /(?:daily rate|per diem|dagsats|dag(?:lig)? sats|taxa di[aá]ria|ajudas? de custo|dieta(?: diaria)?)[^\d-]{0,30}(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)?/i,
+  );
+  if (keywordRateMatch?.[1]) {
+    const parsed = parseFlexibleNumber(keywordRateMatch[1]);
+    if (parsed !== null && parsed > 0) return parsed;
+  }
+  const trailingRateMatch = prompt.match(/(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)\s*(?:per day|per diem|pr\.?\s*dag|por dia)/i);
+  if (trailingRateMatch?.[1]) {
+    const parsed = parseFlexibleNumber(trailingRateMatch[1]);
+    if (parsed !== null && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+type TravelExpenseCost = {
+  comments: string;
+  amountCurrencyIncVat: number;
+};
+
+function extractTravelExpenseCosts(prompt: string): TravelExpenseCost[] {
+  const results: TravelExpenseCost[] = [];
+  const regex = /([A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå0-9][A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå0-9\s'’"\/-]{2,100}?)\s+(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(prompt)) !== null) {
+    const rawLabel = (match[1] ?? "").trim();
+    const parsedAmount = parseFlexibleNumber(match[2] ?? "");
+    if (!rawLabel || parsedAmount === null || parsedAmount <= 0) continue;
+    const cleanedLabel = rawLabel
+      .replace(/^(?:expenses?|despesas?|kostnader?|utgifter?|expense(?:s)?):?\s*/i, "")
+      .replace(/\s+(?:and|og|e|y|und|et)\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleanedLabel) continue;
+    if (/(?:daily rate|per diem|dagsats|taxa di[aá]ria|ajudas? de custo|dieta)/i.test(cleanedLabel)) continue;
+    results.push({
+      comments: cleanedLabel.slice(0, 120),
+      amountCurrencyIncVat: Math.round(parsedAmount * 100) / 100,
+    });
+  }
+
+  const deduped: TravelExpenseCost[] = [];
+  for (const item of results) {
+    if (deduped.some((existing) => existing.comments === item.comments && existing.amountCurrencyIncVat === item.amountCurrencyIncVat)) {
+      continue;
+    }
+    deduped.push(item);
+    if (deduped.length >= 8) break;
+  }
+  return deduped;
+}
+
+function extractTravelDestination(prompt: string, quoted: string | null): string | null {
+  if (quoted) {
+    const quotedDestination = quoted.match(/\b([A-ZÆØÅÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå'’-]{2,})\b(?!.*\b[A-ZÆØÅÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå'’-]{2,}\b)/);
+    if (quotedDestination?.[1]) return quotedDestination[1];
+  }
+  const destinationMatch = prompt.match(/(?:to|til|para|pour|nach|a|i)\s+(?:cliente\s+|customer\s+|kunde\s+)?([A-ZÆØÅÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå'’-]{2,})/);
+  if (destinationMatch?.[1]) return destinationMatch[1];
+  return null;
+}
+
+function buildTravelExpenseCreateBody(
+  prompt: string,
+  quoted: string | null,
+  travelDate?: string,
+): Record<string, unknown> {
+  const date = travelDate ?? todayIsoDate();
+  const title = quoted ?? "Generated travel expense";
+  const days = extractTravelDays(prompt) ?? 1;
+  const destination = extractTravelDestination(prompt, quoted) ?? "Norge";
+  const perDiemRate = extractPerDiemRate(prompt);
+  const costs = extractTravelExpenseCosts(prompt);
+
+  const body: Record<string, unknown> = {
+    employee: { id: "{{employee_id}}" },
+    date,
+    title,
+  };
+
+  body.travelDetails = [
+    {
+      departureDate: date,
+      returnDate: addDaysIso(date, Math.max(0, days - 1)),
+      destination,
+      purpose: title,
+    },
+  ];
+
+  if (perDiemRate !== null && perDiemRate > 0) {
+    body.perDiemCompensations = [
+      {
+        count: days,
+        rate: perDiemRate,
+        location: destination,
+      },
+    ];
+  }
+
+  if (costs.length > 0) {
+    body.costs = costs.map((cost) => ({
+      ...cost,
+      date,
+      paymentType: {
+        id: "{{travelExpensePaymentType_id}}",
+        description: "{{travelExpensePaymentType_description}}",
+      },
+    }));
+  }
+
+  return body;
+}
+
 function splitPersonName(name: string | null): { firstName: string; lastName: string } {
   if (!name) {
     const suffix = Date.now().toString().slice(-6);
@@ -312,6 +465,9 @@ function isCreateIntent(lower: string): boolean {
     "opprett",
     "registrer",
     "register",
+    "registe",
+    "registre",
+    "registrar",
     "lag ",
     "criar",
     "crear",
@@ -375,6 +531,19 @@ function isUpdateIntent(lower: string): boolean {
     "endre",
     "modify",
     "rediger",
+  ].some((token) => lower.includes(token));
+}
+
+function hasTravelExpenseKeyword(lower: string): boolean {
+  return [
+    "travel expense",
+    "reise",
+    "reiseregning",
+    "reiseutgift",
+    "despesa de viagem",
+    "gasto de viaje",
+    "reisekosten",
+    "note de frais",
   ].some((token) => lower.includes(token));
 }
 
@@ -929,6 +1098,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   if (
     (lower.includes("customer") || lower.includes("kunde") || lower.includes("cliente")) &&
     createIntent &&
+    !hasTravelExpenseKeyword(lower) &&
     !lower.includes("order") &&
     !lower.includes("ordre") &&
     !lower.includes("invoice") &&
@@ -957,7 +1127,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent && !lower.includes("travel expense") && !lower.includes("reise")) {
+  if ((lower.includes("employee") || lower.includes("ansatt")) && createIntent && !hasTravelExpenseKeyword(lower)) {
     const person = splitPersonName(quoted ?? capitalized);
     const empBody: Record<string, unknown> = {
       firstName: person.firstName,
@@ -1066,7 +1236,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     }
   }
 
-  if ((lower.includes("travel expense") || lower.includes("reise")) && updateIntent) {
+  if (hasTravelExpenseKeyword(lower) && updateIntent) {
     const body: Record<string, unknown> = {};
     if (quoted) body.description = quoted;
     if (Object.keys(body).length > 0) {
@@ -1097,7 +1267,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     }
   }
 
-  if ((lower.includes("travel expense") || lower.includes("reise")) && deleteIntent) {
+  if (hasTravelExpenseKeyword(lower) && deleteIntent) {
     if (numericId) {
       return {
         summary: "Heuristic travel expense delete flow",
@@ -1238,7 +1408,9 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("travel expense") || lower.includes("reise")) && createIntent) {
+  if (hasTravelExpenseKeyword(lower) && createIntent) {
+    const dateMatch = prompt.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    const travelBody = buildTravelExpenseCreateBody(prompt, quoted, dateMatch?.[1]);
     return {
       summary: "Heuristic travel expense create flow",
       steps: [
@@ -1252,11 +1424,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
         {
           method: "POST",
           path: "/travelExpense",
-          body: {
-            employee: { id: "{{employee_id}}" },
-            date: todayIsoDate(),
-            description: quoted ?? "Generated travel expense",
-          },
+          body: travelBody,
           saveAs: "travelExpense",
           reason: "Create travel expense for employee",
         },
@@ -1394,7 +1562,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if (readIntent && (lower.includes("travel expense") || lower.includes("reise"))) {
+  if (readIntent && hasTravelExpenseKeyword(lower)) {
     return {
       summary: "Heuristic travel expense list/read flow",
       steps: [
@@ -1572,7 +1740,7 @@ function buildGenericCreatePlan(
         summary: "Heuristic detected travel expense create",
         steps: [
           { method: "GET", path: "/employee", params: { count: 1, fields: "id" }, saveAs: "employee", reason: "Find employee for travel expense" },
-          { method: "POST", path: "/travelExpense", body: { employee: { id: "{{employee_id}}" }, date: todayIsoDate(), title: quoted ?? "Generated travel expense" }, saveAs: "travelExpense" },
+          { method: "POST", path: "/travelExpense", body: buildTravelExpenseCreateBody(prompt, quoted), saveAs: "travelExpense" },
         ],
       };
     default:
@@ -1715,7 +1883,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- POST /project: { name, startDate (YYYY-MM-DD), projectManager: { id } } — get a manager first via GET /employee",
     "- POST /order: { customer: { id }, orderDate (YYYY-MM-DD), deliveryDate (YYYY-MM-DD) } — optional: orderLines: [{ product: { id }, count }]",
     "- POST /invoice: { customer: { id }, invoiceDate (YYYY-MM-DD), invoiceDueDate (YYYY-MM-DD), orders: [{ id }] } — create order first if needed",
-    "- POST /travelExpense: { employee: { id }, date (YYYY-MM-DD) } — optional: title, description",
+    "- POST /travelExpense: { employee: { id }, date (YYYY-MM-DD) } — optional: title, description, travelDetails, perDiemCompensations, costs",
+    "- travelDetails item: { departureDate, returnDate, destination, purpose }",
+    "- perDiemCompensations item: { count, rate } — optional: location",
+    "- costs item: { comments, amountCurrencyIncVat, date, paymentType: { id, description } }",
     "- POST /ledger/voucher: { date (YYYY-MM-DD), description } — optional: postings: [{ amount, account: { id } }]",
     "",
     "REQUIRED BODY FIELDS FOR PUT (include id in path AND body):",
@@ -1728,6 +1899,7 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "  use name='Nordmann AS' and email='info@nordmann.no' — do NOT use placeholder or generic values.",
     "- If the prompt mentions a name, email, phone, date, amount, or any specific value, use it EXACTLY as written.",
     "- For employees: split the full name into firstName and lastName. 'Ola Nordmann' → firstName='Ola', lastName='Nordmann'.",
+    "- For travel expense prompts that mention daily allowance/per diem or itemized costs, include perDiemCompensations and costs.",
     "- Do NOT invent fields. Only use field names listed above.",
     "- Do NOT include sendType, sendTypeEmail, or any undocumented fields.",
     "- For PUT requests: always GET the entity first to obtain its current id and version number.",
@@ -1903,6 +2075,74 @@ function generatedEntityName(path: string): string {
   return `Generated ${readable} ${suffix}`;
 }
 
+function firstDescriptionFromVars(vars: Record<string, unknown>, candidates: string[]): string | undefined {
+  for (const candidate of candidates) {
+    const direct = resolveVar(vars, candidate);
+    if (typeof direct === "string" && direct.trim().length > 0) return direct.trim();
+    const extracted = extractDescriptionFromVarValue(direct);
+    if (typeof extracted === "string" && extracted.trim().length > 0) return extracted.trim();
+  }
+  return undefined;
+}
+
+function normalizeCostsArray(body: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (!Array.isArray(body.costs)) return [];
+  return body.costs
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .map((item) => ({ ...item }));
+}
+
+function withTravelExpensePaymentTypeDefaults(
+  body: Record<string, unknown>,
+  vars: Record<string, unknown>,
+): { body: Record<string, unknown>; changed: boolean } {
+  const costs = normalizeCostsArray(body);
+  if (costs.length === 0) return { body, changed: false };
+
+  const paymentTypeId = firstIdFromVars(vars, [
+    "travelExpensePaymentType_id",
+    "travelExpensePaymentTypeId",
+    "travelExpensePaymentType.id",
+    "travelExpensePaymentType",
+  ]);
+  const paymentTypeDescription = firstDescriptionFromVars(vars, [
+    "travelExpensePaymentType_description",
+    "travelExpensePaymentTypeDescription",
+    "travelExpensePaymentType.description",
+    "travelExpensePaymentType",
+  ]);
+  if (!hasValue(paymentTypeId) || !hasValue(paymentTypeDescription)) return { body, changed: false };
+
+  let changed = false;
+  const nextCosts = costs.map((item) => {
+    const nextItem = { ...item };
+    const paymentType = toRecord(nextItem.paymentType);
+    let itemChanged = false;
+    if (!hasValue(paymentType.id)) {
+      paymentType.id = paymentTypeId;
+      itemChanged = true;
+    }
+    if (!hasValue(paymentType.description)) {
+      paymentType.description = paymentTypeDescription;
+      itemChanged = true;
+    }
+    if (itemChanged) {
+      nextItem.paymentType = paymentType;
+      changed = true;
+    }
+    return nextItem;
+  });
+
+  if (!changed) return { body, changed: false };
+  return {
+    body: {
+      ...body,
+      costs: nextCosts,
+    },
+    changed: true,
+  };
+}
+
 function withPreflightBodyDefaults(
   method: AllowedMethod,
   path: string,
@@ -2002,8 +2242,14 @@ function withPreflightBodyDefaults(
     }
   } else if (normalizedPath === "/travelExpense") {
     setIfMissing("date", todayIsoDate());
+    setIfMissing("title", generatedEntityName(path));
     if (!hasValue(next.employee) && hasValue(employeeId)) {
       next.employee = { id: employeeId };
+      changed = true;
+    }
+    const paymentTypePatched = withTravelExpensePaymentTypeDefaults(next, vars);
+    if (paymentTypePatched.changed) {
+      next.costs = paymentTypePatched.body.costs;
       changed = true;
     }
   } else if (normalizedPath === "/employee") {
@@ -2051,6 +2297,12 @@ function validationFieldsFromError(error: unknown): string[] {
     }
     if (message.includes("avdeling") || message.includes("department")) {
       fields.push("department");
+    }
+    if (message.includes("paymenttype") || message.includes("payment type")) {
+      fields.push("paymentType");
+    }
+    if (message.includes("kost") || message.includes("expense cost") || message.includes("travel cost")) {
+      fields.push("costs");
     }
   }
   return [...new Set(fields)];
@@ -2315,6 +2567,8 @@ async function ensureTemplateVariable(
     }
   } else if (alias === "department") {
     await fetchOrCreateDepartmentId(client, vars, allowCreate);
+  } else if (alias === "travelExpensePaymentType") {
+    await fetchTravelExpensePaymentType(client, vars);
   }
 
   return resolveVar(vars, templateVar) !== undefined;
@@ -2328,6 +2582,77 @@ function cacheId(vars: Record<string, unknown>, key: string, id: unknown): void 
   if (!hasValue(id)) return;
   vars[`${key}_id`] = id;
   vars[key] = { id };
+}
+
+function cacheTravelExpensePaymentType(
+  vars: Record<string, unknown>,
+  id: unknown,
+  description: string,
+): void {
+  if (!hasValue(id) || !hasValue(description)) return;
+  vars.travelExpensePaymentType_id = id;
+  vars.travelExpensePaymentType_description = description;
+  vars.travelExpensePaymentType = { id, description };
+}
+
+async function fetchTravelExpensePaymentType(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+): Promise<{ id: unknown; description: string } | undefined> {
+  const cachedIdValue = firstIdFromVars(vars, [
+    "travelExpensePaymentType_id",
+    "travelExpensePaymentTypeId",
+    "travelExpensePaymentType.id",
+    "travelExpensePaymentType",
+  ]);
+  const cachedDescription = firstDescriptionFromVars(vars, [
+    "travelExpensePaymentType_description",
+    "travelExpensePaymentTypeDescription",
+    "travelExpensePaymentType.description",
+    "travelExpensePaymentType",
+  ]);
+  if (hasValue(cachedIdValue) && hasValue(cachedDescription)) {
+    return { id: cachedIdValue, description: cachedDescription as string };
+  }
+
+  try {
+    const fetched = await client.request("GET", "/travelExpense/paymentType", {
+      params: {
+        count: 1,
+        from: 0,
+        fields: "id,description",
+      },
+    });
+    const primary = primaryValue(fetched);
+    const id = extractIdFromVarValue(primary);
+    const description = extractDescriptionFromVarValue(primary);
+    if (!hasValue(id) || !hasValue(description)) return undefined;
+    cacheTravelExpensePaymentType(vars, id, description as string);
+    return { id, description: description as string };
+  } catch {
+    return undefined;
+  }
+}
+
+async function withTravelExpensePaymentTypeFromApi(
+  client: TripletexClient,
+  method: AllowedMethod,
+  path: string,
+  body: unknown,
+  vars: Record<string, unknown>,
+): Promise<{ body: unknown; changed: boolean }> {
+  if (method !== "POST" && method !== "PUT") return { body, changed: false };
+  if (normalizePath(path) !== "/travelExpense") return { body, changed: false };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { body, changed: false };
+  const bodyRecord = toRecord(body);
+  if (normalizeCostsArray(bodyRecord).length === 0) return { body, changed: false };
+
+  const resolved = withTravelExpensePaymentTypeDefaults(bodyRecord, vars);
+  if (resolved.changed) return resolved;
+
+  const fetched = await fetchTravelExpensePaymentType(client, vars);
+  if (!fetched) return { body, changed: false };
+  return withTravelExpensePaymentTypeDefaults(bodyRecord, vars);
 }
 
 async function fetchOrCreateCustomerId(
@@ -2539,12 +2864,18 @@ async function enrichVarsForValidationRetry(
     roots.has("departmentId") ||
     roots.has("userType") ||
     normalizedPath === "/employee";
+  const needsTravelExpensePaymentType =
+    roots.has("paymentType") ||
+    roots.has("paymentTypeId") ||
+    roots.has("costs") ||
+    roots.has("cost");
 
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
   if (needsEmployee) await fetchOrCreateEmployeeId(client, vars, needsFreshProjectManager);
   if (needsOrder) await fetchOrCreateOrderId(client, vars);
   if (needsProduct) await fetchOrCreateProductId(client, vars, true);
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
+  if (needsTravelExpensePaymentType) await fetchTravelExpensePaymentType(client, vars);
 }
 
 function withValidationFieldDefaults(
@@ -2659,6 +2990,16 @@ function withValidationFieldDefaults(
           changed = true;
         }
         break;
+      case "paymentType":
+      case "paymentTypeId":
+      case "costs": {
+        const patched = withTravelExpensePaymentTypeDefaults(next, vars);
+        if (patched.changed) {
+          next.costs = patched.body.costs;
+          changed = true;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -2701,6 +3042,13 @@ function withValidationFieldDefaults(
     setIfMissing("userType", defaultEmployeeUserType());
     setIfMissing("email", defaultEmployeeEmail);
     if (hasValue(departmentId)) setIfMissing("department", { id: departmentId });
+  }
+  if (normalizedPath === "/travelExpense") {
+    const patched = withTravelExpensePaymentTypeDefaults(next, vars);
+    if (patched.changed) {
+      next.costs = patched.body.costs;
+      changed = true;
+    }
   }
 
   return changed ? { body: next, changed } : { body, changed };
@@ -2750,6 +3098,12 @@ export async function executePlan(
         const orderDraft = toRecord(body);
         if (!Array.isArray(orderDraft.orderLines) || orderDraft.orderLines.length === 0) {
           await fetchOrCreateProductId(client, vars, true);
+        }
+      }
+      if (!dryRun) {
+        const travelExpenseDefaults = await withTravelExpensePaymentTypeFromApi(client, step.method, path, body, vars);
+        if (travelExpenseDefaults.changed) {
+          body = travelExpenseDefaults.body;
         }
       }
       const preflightDefaults = withPreflightBodyDefaults(step.method, path, body, vars);
@@ -2883,12 +3237,22 @@ export async function executePlan(
     }
   }
 
-  if (successCount === 0 && failedSteps.length > 0) {
-    const summary = failedSteps
-      .slice(0, 3)
-      .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
-      .join(" | ");
-    throw new SolveError(`Plan execution failed: ${summary}`);
+  if (failedSteps.length > 0) {
+    const summarize = (items: Array<{ step: number; method: AllowedMethod; path: string; error: string }>): string =>
+      items
+        .slice(0, 4)
+        .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
+        .join(" | ");
+
+    const mutatingFailures = failedSteps.filter((item) => item.method !== "GET");
+    if (mutatingFailures.length > 0) {
+      throw new SolveError(`Plan execution failed on mutating steps: ${summarize(mutatingFailures)}`);
+    }
+    throw new SolveError(`Plan execution failed on read steps: ${summarize(failedSteps)}`);
+  }
+
+  if (successCount === 0 && count > 0) {
+    throw new SolveError("Plan execution failed: no successful steps");
   }
   return count;
 }

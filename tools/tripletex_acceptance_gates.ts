@@ -912,7 +912,7 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
-    name: "executePlan continues past mutating step failure and returns success",
+    name: "executePlan surfaces mutating step failures after attempting remaining steps",
     run: async () => {
       const originalFetch = globalThis.fetch;
       const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
@@ -958,13 +958,88 @@ async function runGates(): Promise<void> {
           ],
         };
 
-        const stepCount = await executePlan(client, plan, false);
-        assert.equal(stepCount, 3, "expected all 3 steps to be attempted");
+        await assert.rejects(
+          () => executePlan(client, plan, false),
+          /Plan execution failed on mutating steps/,
+        );
         assert.equal(
           calls.filter((call) => call.method === "GET" && call.path === "/employee").length,
           1,
           "expected execution to continue to subsequent steps after failure",
         );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "executePlan injects travel expense paymentType defaults via lookup endpoint",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/employee") return jsonResponse(200, { values: [{ id: 3001 }] });
+        if (method === "GET" && path === "/travelExpense/paymentType") {
+          return jsonResponse(200, { values: [{ id: 3002, description: "Privat utlegg" }] });
+        }
+        if (method === "POST" && path === "/travelExpense") {
+          const payload = body as Record<string, unknown>;
+          const costs = Array.isArray(payload.costs) ? (payload.costs as Array<Record<string, unknown>>) : [];
+          const paymentType = (costs[0]?.paymentType ?? {}) as Record<string, unknown>;
+          if (!paymentType.id || !paymentType.description) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "costs.paymentType", message: "Feltet må fylles ut." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 3003 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "travel expense paymentType defaults",
+          steps: [
+            { method: "GET", path: "/employee", params: { count: 1 }, saveAs: "employee" },
+            {
+              method: "POST",
+              path: "/travelExpense",
+              body: {
+                employee: { id: "{{employee_id}}" },
+                date: "2026-03-19",
+                title: "Trip",
+                costs: [{ comments: "Taxi", amountCurrencyIncVat: 500, date: "2026-03-19" }],
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        assert.equal(
+          calls.filter((call) => call.method === "GET" && call.path === "/travelExpense/paymentType").length,
+          1,
+          "expected one payment type lookup",
+        );
+        const travelExpensePost = calls.find((call) => call.method === "POST" && call.path === "/travelExpense");
+        assert(travelExpensePost, "expected POST /travelExpense");
+        const costs = ((travelExpensePost.body as Record<string, unknown>)?.costs ?? []) as Array<Record<string, unknown>>;
+        const paymentType = (costs[0]?.paymentType ?? {}) as Record<string, unknown>;
+        assert.equal(paymentType.id, 3002, "expected injected paymentType id");
+        assert.equal(paymentType.description, "Privat utlegg", "expected injected paymentType description");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -1306,6 +1381,30 @@ async function runGates(): Promise<void> {
         tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
       });
       assert(plan.steps.some((step) => step.method === "DELETE"), "expected DELETE step");
+    },
+  });
+
+  gates.push({
+    name: "heuristic builds rich travel expense body with per diem and costs",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt:
+          "Registe uma despesa de viagem para Rafael Sousa (rafael.sousa@example.org) referente a \"Visita cliente Tromsø\". A viagem durou 5 dias com ajudas de custo (taxa diária 800 NOK). Despesas: bilhete de avião 6000 NOK e táxi 700 NOK.",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      const travelStep = plan.steps.find((step) => step.method === "POST" && step.path === "/travelExpense");
+      assert(travelStep, "expected POST /travelExpense in heuristic plan");
+      const body = (travelStep?.body ?? {}) as Record<string, unknown>;
+      const perDiem = Array.isArray(body.perDiemCompensations) ? body.perDiemCompensations : [];
+      const costs = Array.isArray(body.costs) ? body.costs : [];
+      assert.equal(perDiem.length, 1, "expected one per diem item");
+      assert.equal(Number((perDiem[0] as Record<string, unknown>)?.count), 5, "expected extracted day count");
+      assert.equal(Number((perDiem[0] as Record<string, unknown>)?.rate), 800, "expected extracted daily rate");
+      assert(costs.length >= 2, "expected extracted travel costs");
+      const firstCostPaymentType = ((costs[0] as Record<string, unknown>)?.paymentType ?? {}) as Record<string, unknown>;
+      assert(firstCostPaymentType.id, "expected templated paymentType id in costs");
+      assert(firstCostPaymentType.description, "expected templated paymentType description in costs");
     },
   });
 
