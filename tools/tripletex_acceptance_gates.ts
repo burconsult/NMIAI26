@@ -11,9 +11,10 @@ type Gate = {
 
 type ContractCase = {
   basePath: string;
+  actionName?: string;
   entityPrompt: string;
   methods: Array<"GET" | "POST" | "PUT" | "DELETE">;
-  idPathRequiredFor?: Array<"PUT" | "DELETE">;
+  idPathRequiredFor?: Array<"POST" | "PUT" | "DELETE">;
 };
 
 const CONTRACT_CASES: ContractCase[] = [
@@ -33,6 +34,22 @@ const CONTRACT_CASES: ContractCase[] = [
   { basePath: "/ledger/account", entityPrompt: "ledger account", methods: ["GET"] },
   { basePath: "/ledger/posting", entityPrompt: "ledger posting", methods: ["GET"] },
   { basePath: "/ledger/voucher", entityPrompt: "ledger voucher", methods: ["GET", "POST", "DELETE"], idPathRequiredFor: ["DELETE"] },
+  { basePath: "/invoice", actionName: "payment", entityPrompt: "invoice payment", methods: ["POST"], idPathRequiredFor: ["POST"] },
+  {
+    basePath: "/invoice",
+    actionName: "createCreditNote",
+    entityPrompt: "invoice credit note",
+    methods: ["POST"],
+    idPathRequiredFor: ["POST"],
+  },
+  { basePath: "/order", actionName: "invoice", entityPrompt: "order invoice", methods: ["POST"], idPathRequiredFor: ["POST"] },
+  {
+    basePath: "/ledger/voucher",
+    actionName: "reverse",
+    entityPrompt: "ledger voucher reverse",
+    methods: ["POST"],
+    idPathRequiredFor: ["POST"],
+  },
 ];
 
 function sampleBody(basePath: string): Record<string, unknown> {
@@ -62,11 +79,23 @@ function sampleBody(basePath: string): Record<string, unknown> {
 }
 
 function sampleExecutionBody(
-  basePath: string,
+  caseDef: ContractCase,
   method: "GET" | "POST" | "PUT" | "DELETE",
 ): Record<string, unknown> | undefined {
   if (method !== "POST" && method !== "PUT") return undefined;
-  const base = sampleBody(basePath);
+  if (caseDef.actionName === "payment") {
+    return { paymentDate: "2026-03-19", amount: 10 };
+  }
+  if (caseDef.actionName === "createCreditNote") {
+    return { date: "2026-03-19", reason: "Gate credit note" };
+  }
+  if (caseDef.actionName === "invoice") {
+    return { invoiceDate: "2026-03-19" };
+  }
+  if (caseDef.actionName === "reverse") {
+    return { date: "2026-03-19", description: "Gate reverse" };
+  }
+  const base = sampleBody(caseDef.basePath);
   if (method === "PUT") {
     return {
       ...base,
@@ -99,15 +128,21 @@ function getParamsForMethod(basePath: string, method: "GET" | "POST" | "PUT" | "
 }
 
 function buildPlan(caseDef: ContractCase, method: "GET" | "POST" | "PUT" | "DELETE"): ExecutionPlan {
-  const idPathRequired = (caseDef.idPathRequiredFor ?? []).includes(method as "PUT" | "DELETE");
+  const idPathRequired = (caseDef.idPathRequiredFor ?? []).includes(method as "POST" | "PUT" | "DELETE");
+  const path =
+    idPathRequired && caseDef.actionName
+      ? `${caseDef.basePath}/123/:${caseDef.actionName}`
+      : idPathRequired
+        ? `${caseDef.basePath}/123`
+        : caseDef.basePath;
   return {
     summary: `${caseDef.basePath} ${method} acceptance plan`,
     steps: [
       {
         method,
-        path: idPathRequired ? `${caseDef.basePath}/123` : caseDef.basePath,
+        path,
         params: getParamsForMethod(caseDef.basePath, method),
-        body: method === "POST" || method === "PUT" ? sampleBody(caseDef.basePath) : undefined,
+        body: sampleExecutionBody(caseDef, method),
       },
     ],
   };
@@ -183,8 +218,13 @@ async function runGates(): Promise<void> {
 
         for (const caseDef of CONTRACT_CASES) {
           for (const method of caseDef.methods) {
-            const requiresIdPath = (caseDef.idPathRequiredFor ?? []).includes(method as "PUT" | "DELETE");
-            const path = requiresIdPath ? `${caseDef.basePath}/123` : caseDef.basePath;
+            const requiresIdPath = (caseDef.idPathRequiredFor ?? []).includes(method as "POST" | "PUT" | "DELETE");
+            const path =
+              requiresIdPath && caseDef.actionName
+                ? `${caseDef.basePath}/123/:${caseDef.actionName}`
+                : requiresIdPath
+                  ? `${caseDef.basePath}/123`
+                  : caseDef.basePath;
             const plan: ExecutionPlan = {
               summary: `matrix ${method} ${caseDef.basePath}`,
               steps: [
@@ -192,7 +232,7 @@ async function runGates(): Promise<void> {
                   method,
                   path,
                   params: getParamsForMethod(caseDef.basePath, method),
-                  body: sampleExecutionBody(caseDef.basePath, method),
+                  body: sampleExecutionBody(caseDef, method),
                 },
               ],
             };
@@ -1318,6 +1358,68 @@ async function runGates(): Promise<void> {
       });
       assert(plan.steps.some((step) => step.method === "POST" && step.path === "/invoice"), "expected POST /invoice in heuristic plan");
       const issues = validatePlanForPrompt("Create invoice for customer ACME", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects invoice payment flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Register payment for invoice 1234 with amount 2500 NOK",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.path === "/invoice/1234/:payment"), "expected invoice payment action path");
+      const issues = validatePlanForPrompt("Register payment for invoice 1234 with amount 2500 NOK", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects credit note flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Create credit note for invoice 2345 due to overcharge",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(
+        plan.steps.some((step) => step.path === "/invoice/2345/:createCreditNote"),
+        "expected createCreditNote action path",
+      );
+      const issues = validatePlanForPrompt("Create credit note for invoice 2345 due to overcharge", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects voucher reverse flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Reverse voucher 3210",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(
+        plan.steps.some((step) => step.path === "/ledger/voucher/3210/:reverse"),
+        "expected ledger voucher reverse action path",
+      );
+      const issues = validatePlanForPrompt("Reverse voucher 3210", plan);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects order invoice flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Invoice order 888",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.path === "/order/888/:invoice"), "expected order invoice action path");
+      const issues = validatePlanForPrompt("Invoice order 888", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
     },
   });

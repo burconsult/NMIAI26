@@ -253,6 +253,21 @@ function extractFirstNumericId(prompt: string): string | null {
   return match?.[1] ?? null;
 }
 
+function extractEntityId(prompt: string, keywords: string[]): string | null {
+  if (keywords.length === 0) return null;
+  const alternatives = keywords.map((keyword) => keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const explicitPattern = new RegExp(
+    `(?:${alternatives})\\s*(?:id|nr|number|no\\.?|#|:)?\\s*(\\d{1,9})\\b`,
+    "i",
+  );
+  const explicitMatch = prompt.match(explicitPattern);
+  if (explicitMatch?.[1]) return explicitMatch[1];
+
+  const nearbyPattern = new RegExp(`(?:${alternatives})[^\\d]{0,20}(\\d{1,9})\\b`, "i");
+  const nearbyMatch = prompt.match(nearbyPattern);
+  return nearbyMatch?.[1] ?? null;
+}
+
 function extractPhone(prompt: string): string | null {
   const match = prompt.match(/\+?\d[\d\s-]{6,}\d/);
   return match?.[0]?.replace(/\s+/g, " ").trim() ?? null;
@@ -547,6 +562,57 @@ function hasTravelExpenseKeyword(lower: string): boolean {
   ].some((token) => lower.includes(token));
 }
 
+function hasPaymentIntent(lower: string): boolean {
+  return [
+    "register payment",
+    "payment",
+    "betaling",
+    "betale",
+    "pagamento",
+    "pago",
+    "pagar",
+    "zahlung",
+    "paiement",
+  ].some((token) => lower.includes(token));
+}
+
+function hasCreditNoteIntent(lower: string): boolean {
+  return [
+    "credit note",
+    "credit memo",
+    "kreditnota",
+    "kredittnota",
+    "nota de credito",
+    "nota de crédito",
+    "avoir",
+    "gutschrift",
+  ].some((token) => lower.includes(token));
+}
+
+function hasReverseIntent(lower: string): boolean {
+  return [
+    "reverse",
+    "reverser",
+    "reversal",
+    "storno",
+    "reverter",
+    "revertir",
+    "motsatt",
+    "tilbakefør",
+    "tilbakefor",
+  ].some((token) => lower.includes(token));
+}
+
+function extractPaymentAmount(prompt: string): number | null {
+  const amountMatch = prompt.match(
+    /(?:payment|betaling|pagamento|pago|paid|betalt|amount|bel[øo]p)[^\d-]{0,30}(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)?/i,
+  );
+  if (!amountMatch?.[1]) return null;
+  const parsed = parseFlexibleNumber(amountMatch[1]);
+  if (parsed === null || parsed <= 0) return null;
+  return Math.round(parsed * 100) / 100;
+}
+
 type NormalizedEntity =
   | "employee"
   | "customer"
@@ -567,6 +633,7 @@ type EndpointContract = {
   entity: NormalizedEntity;
   methods: AllowedMethod[];
   idPathRequiredFor?: AllowedMethod[];
+  actionName?: string;
 };
 
 const ENDPOINT_CONTRACTS: EndpointContract[] = [
@@ -591,6 +658,13 @@ const ENDPOINT_CONTRACTS: EndpointContract[] = [
     methods: ["GET", "POST", "DELETE"],
     idPathRequiredFor: ["DELETE"],
   },
+];
+
+const ACTION_ENDPOINT_CONTRACTS: EndpointContract[] = [
+  { basePath: "/invoice", entity: "invoice", methods: ["POST"], actionName: "payment", idPathRequiredFor: ["POST"] },
+  { basePath: "/invoice", entity: "invoice", methods: ["POST"], actionName: "createCreditNote", idPathRequiredFor: ["POST"] },
+  { basePath: "/order", entity: "order", methods: ["POST"], actionName: "invoice", idPathRequiredFor: ["POST"] },
+  { basePath: "/ledger/voucher", entity: "ledger_voucher", methods: ["POST"], actionName: "reverse", idPathRequiredFor: ["POST"] },
 ];
 
 const ENDPOINT_CONTRACTS_BY_MATCH = [...ENDPOINT_CONTRACTS].sort((a, b) => b.basePath.length - a.basePath.length);
@@ -708,7 +782,32 @@ function toRecord(value: unknown): Record<string, unknown> {
   return { ...(value as Record<string, unknown>) };
 }
 
+function isIdPathSegment(segment: string): boolean {
+  return /^\d+$/.test(segment) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(segment);
+}
+
+function actionEndpointMatchesPath(path: string, contract: EndpointContract): boolean {
+  if (!contract.actionName) return false;
+  const normalized = normalizePath(path);
+  const pathParts = normalized.split("/").filter(Boolean);
+  const baseParts = contract.basePath.split("/").filter(Boolean);
+  if (pathParts.length !== baseParts.length + 2) return false;
+
+  for (let i = 0; i < baseParts.length; i += 1) {
+    const expected = baseParts[i]?.toLowerCase();
+    const observed = pathParts[i]?.toLowerCase();
+    if (expected !== observed) return false;
+  }
+
+  const idSegment = pathParts[baseParts.length] ?? "";
+  const actionSegment = pathParts[baseParts.length + 1] ?? "";
+  return isIdPathSegment(idSegment) && actionSegment.toLowerCase() === `:${contract.actionName.toLowerCase()}`;
+}
+
 function endpointContractFromPath(path: string): EndpointContract | null {
+  for (const contract of ACTION_ENDPOINT_CONTRACTS) {
+    if (actionEndpointMatchesPath(path, contract)) return contract;
+  }
   const normalized = normalizePath(path).toLowerCase();
   for (const contract of ENDPOINT_CONTRACTS_BY_MATCH) {
     const base = contract.basePath.toLowerCase();
@@ -717,7 +816,9 @@ function endpointContractFromPath(path: string): EndpointContract | null {
   return null;
 }
 
-function pathHasIdSegment(path: string, basePath: string): boolean {
+function pathHasIdSegment(path: string, contract: EndpointContract): boolean {
+  if (contract.actionName) return actionEndpointMatchesPath(path, contract);
+  const basePath = contract.basePath;
   const normalized = normalizePath(path);
   const normalizedLower = normalized.toLowerCase();
   const baseLower = basePath.toLowerCase();
@@ -726,10 +827,12 @@ function pathHasIdSegment(path: string, basePath: string): boolean {
   if (!remainder) return false;
   const firstSegment = remainder.split("/")[0] ?? "";
   if (!firstSegment || firstSegment.startsWith(":")) return false;
-  return /^\d+$/.test(firstSegment) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(firstSegment);
+  return isIdPathSegment(firstSegment);
 }
 
-function pathMatchesChallengeShape(path: string, basePath: string): boolean {
+function pathMatchesChallengeShape(path: string, contract: EndpointContract): boolean {
+  if (contract.actionName) return actionEndpointMatchesPath(path, contract);
+  const basePath = contract.basePath;
   const normalized = normalizePath(path);
   const normalizedLower = normalized.toLowerCase();
   const baseLower = basePath.toLowerCase();
@@ -739,7 +842,32 @@ function pathMatchesChallengeShape(path: string, basePath: string): boolean {
   if (!remainder) return false;
   if (remainder.includes("/")) return false;
   if (remainder.startsWith(":")) return false;
-  return /^\d+$/.test(remainder) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(remainder);
+  return isIdPathSegment(remainder);
+}
+
+function endpointPathShape(contract: EndpointContract): string {
+  if (contract.actionName) return `${contract.basePath}/{id}/:${contract.actionName}`;
+  return `${contract.basePath} or ${contract.basePath}/{id}`;
+}
+
+function isInvoicePaymentActionPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:payment$/i.test(normalized);
+}
+
+function isInvoiceCreditNoteActionPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:createcreditnote$/i.test(normalized);
+}
+
+function isOrderInvoiceActionPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return /^\/order\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:invoice$/i.test(normalized);
+}
+
+function isVoucherReverseActionPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return /^\/ledger\/voucher\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:reverse$/i.test(normalized);
 }
 
 function ensurePlannerSafeQueryParams(
@@ -751,7 +879,7 @@ function ensurePlannerSafeQueryParams(
   const contract = endpointContractFromPath(path);
   if (!contract) return params;
 
-  const hasId = pathHasIdSegment(path, contract.basePath);
+  const hasId = pathHasIdSegment(path, contract);
   const next = { ...params };
 
   if (!hasId) {
@@ -880,14 +1008,14 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
     }
     if (!contract.methods.includes(step.method as AllowedMethod)) {
       issues.push(
-        `step ${stepNumber}: method ${step.method} is not allowed for ${contract.basePath} (allowed: ${contract.methods.join(", ")})`,
+        `step ${stepNumber}: method ${step.method} is not allowed for ${contract.actionName ? `${contract.basePath}/:${contract.actionName}` : contract.basePath} (allowed: ${contract.methods.join(", ")})`,
       );
     }
-    if (!pathMatchesChallengeShape(step.path, contract.basePath)) {
-      issues.push(`step ${stepNumber}: path '${step.path}' must use ${contract.basePath} or ${contract.basePath}/{id}`);
+    if (!pathMatchesChallengeShape(step.path, contract)) {
+      issues.push(`step ${stepNumber}: path '${step.path}' must use ${endpointPathShape(contract)}`);
     }
-    if ((contract.idPathRequiredFor ?? []).includes(step.method as AllowedMethod) && !pathHasIdSegment(step.path, contract.basePath)) {
-      issues.push(`step ${stepNumber}: ${step.method} must target an ID path like ${contract.basePath}/{id}`);
+    if ((contract.idPathRequiredFor ?? []).includes(step.method as AllowedMethod) && !pathHasIdSegment(step.path, contract)) {
+      issues.push(`step ${stepNumber}: ${step.method} must target an ID path like ${endpointPathShape(contract)}`);
     }
     if (requestedEntities.size > 0 && step.method !== "GET" && !allowedEntities.has(contract.entity)) {
       const requestedList = [...requestedEntities].join(", ");
@@ -947,11 +1075,28 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   const quoted = extractQuoted(prompt);
   const capitalized = extractCapitalizedName(prompt);
   const numericId = extractFirstNumericId(prompt);
+  const invoiceId = extractEntityId(prompt, ["invoice", "faktura", "factura", "fatura", "rechnung", "facture"]);
+  const orderIdFromPrompt = extractEntityId(prompt, ["order", "ordre", "pedido", "bestellung", "commande"]);
+  const voucherId = extractEntityId(prompt, ["voucher", "bilag", "beleg", "comprobante"]);
   const phone = extractPhone(prompt);
   const createIntent = isCreateIntent(lower);
   const deleteIntent = isDeleteIntent(lower);
   const updateIntent = isUpdateIntent(lower) && !createIntent && !deleteIntent;
   const readIntent = isReadIntent(lower) && !createIntent && !deleteIntent && !updateIntent;
+  const hasInvoiceKeyword =
+    lower.includes("invoice") ||
+    lower.includes("faktura") ||
+    lower.includes("factura") ||
+    lower.includes("fatura") ||
+    lower.includes("rechnung") ||
+    lower.includes("facture");
+  const hasOrderKeyword =
+    lower.includes("order") ||
+    lower.includes("ordre") ||
+    lower.includes("pedido") ||
+    lower.includes("bestellung") ||
+    lower.includes("commande");
+  const hasVoucherKeyword = lower.includes("voucher") || lower.includes("bilag");
 
   const fixedPriceAmount = extractFixedPriceAmount(prompt);
   const milestonePercent = extractPercentage(prompt);
@@ -1293,6 +1438,45 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
+  if (hasVoucherKeyword && hasReverseIntent(lower) && !readIntent) {
+    if (voucherId) {
+      return {
+        summary: "Heuristic ledger voucher reverse by id flow",
+        steps: [
+          {
+            method: "POST",
+            path: `/ledger/voucher/${voucherId}/:reverse`,
+            body: {
+              date: todayIsoDate(),
+              description: quoted ?? "Generated voucher reversal",
+            },
+          },
+        ],
+      };
+    }
+    return {
+      summary: "Heuristic ledger voucher fetch-and-reverse flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/ledger/voucher",
+          params: { count: 1, fields: "id", dateFrom: defaultLedgerDateFrom(), dateTo: defaultLedgerDateTo() },
+          saveAs: "voucher",
+          reason: "Fetch one voucher id before reversal",
+        },
+        {
+          method: "POST",
+          path: "/ledger/voucher/{{voucher_id}}/:reverse",
+          body: {
+            date: todayIsoDate(),
+            description: quoted ?? "Generated voucher reversal",
+          },
+          reason: "Reverse fetched voucher",
+        },
+      ],
+    };
+  }
+
   if ((lower.includes("voucher") || lower.includes("bilag")) && deleteIntent) {
     if (numericId) {
       return {
@@ -1335,7 +1519,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("order") || lower.includes("ordre")) && createIntent) {
+  if ((lower.includes("order") || lower.includes("ordre")) && createIntent && !hasInvoiceKeyword) {
     return {
       summary: "Heuristic order create flow",
       steps: [
@@ -1364,6 +1548,142 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
           },
           saveAs: "order",
           reason: "Create order with linked customer and product",
+        },
+      ],
+    };
+  }
+
+  if (hasOrderKeyword && hasInvoiceKeyword && !deleteIntent && !readIntent) {
+    if (orderIdFromPrompt) {
+      return {
+        summary: "Heuristic order invoice by id flow",
+        steps: [
+          {
+            method: "POST",
+            path: `/order/${orderIdFromPrompt}/:invoice`,
+            body: {
+              invoiceDate: todayIsoDate(),
+            },
+            saveAs: "invoice",
+            reason: "Invoice the specified order",
+          },
+        ],
+      };
+    }
+    return {
+      summary: "Heuristic order fetch-and-invoice flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/order",
+          params: {
+            count: 1,
+            fields: "id",
+            orderDateFrom: defaultEntityDateFrom(),
+            orderDateTo: defaultEntityDateTo(),
+          },
+          saveAs: "order",
+          reason: "Find one order to invoice directly",
+        },
+        {
+          method: "POST",
+          path: "/order/{{order_id}}/:invoice",
+          body: {
+            invoiceDate: todayIsoDate(),
+          },
+          saveAs: "invoice",
+          reason: "Invoice fetched order",
+        },
+      ],
+    };
+  }
+
+  if (hasPaymentIntent(lower) && hasInvoiceKeyword && !deleteIntent && !readIntent) {
+    const amount = extractPaymentAmount(prompt);
+    const paymentBody: Record<string, unknown> = {
+      paymentDate: todayIsoDate(),
+    };
+    if (amount !== null) paymentBody.amount = amount;
+    if (invoiceId) {
+      return {
+        summary: "Heuristic invoice payment by id flow",
+        steps: [
+          {
+            method: "POST",
+            path: `/invoice/${invoiceId}/:payment`,
+            body: paymentBody,
+            reason: "Register payment for specific invoice",
+          },
+        ],
+      };
+    }
+    return {
+      summary: "Heuristic invoice fetch-and-payment flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/invoice",
+          params: {
+            count: 1,
+            fields: "id",
+            invoiceDateFrom: defaultEntityDateFrom(),
+            invoiceDateTo: defaultEntityDateTo(),
+          },
+          saveAs: "invoice",
+          reason: "Find one invoice to register payment",
+        },
+        {
+          method: "POST",
+          path: "/invoice/{{invoice_id}}/:payment",
+          body: paymentBody,
+          reason: "Register payment for fetched invoice",
+        },
+      ],
+    };
+  }
+
+  if (hasCreditNoteIntent(lower) && hasInvoiceKeyword && !deleteIntent && !readIntent) {
+    if (invoiceId) {
+      return {
+        summary: "Heuristic credit note by invoice id flow",
+        steps: [
+          {
+            method: "POST",
+            path: `/invoice/${invoiceId}/:createCreditNote`,
+            body: {
+              date: todayIsoDate(),
+              reason: quoted ?? "Generated credit note",
+            },
+            saveAs: "creditNote",
+            reason: "Create credit note for specific invoice",
+          },
+        ],
+      };
+    }
+    return {
+      summary: "Heuristic invoice fetch-and-credit-note flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/invoice",
+          params: {
+            count: 1,
+            fields: "id",
+            invoiceDateFrom: defaultEntityDateFrom(),
+            invoiceDateTo: defaultEntityDateTo(),
+          },
+          saveAs: "invoice",
+          reason: "Find one invoice for credit note",
+        },
+        {
+          method: "POST",
+          path: "/invoice/{{invoice_id}}/:createCreditNote",
+          body: {
+            date: todayIsoDate(),
+            reason: quoted ?? "Generated credit note",
+          },
+          saveAs: "creditNote",
+          reason: "Create credit note for fetched invoice",
         },
       ],
     };
@@ -1867,6 +2187,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- /ledger/account: GET",
     "- /ledger/posting: GET",
     "- /ledger/voucher: GET, POST, DELETE (DELETE requires /ledger/voucher/{id})",
+    "- /invoice/{id}/:payment: POST",
+    "- /invoice/{id}/:createCreditNote: POST",
+    "- /order/{id}/:invoice: POST",
+    "- /ledger/voucher/{id}/:reverse: POST",
     "",
     "REQUIRED QUERY PARAMS FOR LIST CALLS:",
     "- GET /ledger/posting: dateFrom, dateTo (YYYY-MM-DD)",
@@ -1888,6 +2212,10 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- perDiemCompensations item: { count, rate } — optional: location",
     "- costs item: { comments, amountCurrencyIncVat, date, paymentType: { id, description } }",
     "- POST /ledger/voucher: { date (YYYY-MM-DD), description } — optional: postings: [{ amount, account: { id } }]",
+    "- POST /invoice/{id}/:payment: { paymentDate (YYYY-MM-DD) } — optional: amount",
+    "- POST /invoice/{id}/:createCreditNote: { date (YYYY-MM-DD) } — optional: reason",
+    "- POST /order/{id}/:invoice: {} — optional: invoiceDate",
+    "- POST /ledger/voucher/{id}/:reverse: { date (YYYY-MM-DD) } — optional: description",
     "",
     "REQUIRED BODY FIELDS FOR PUT (include id in path AND body):",
     "- PUT /employee/{id}: { id, version, firstName, lastName } — fetch first with GET to get id+version",
@@ -1900,6 +2228,9 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     "- If the prompt mentions a name, email, phone, date, amount, or any specific value, use it EXACTLY as written.",
     "- For employees: split the full name into firstName and lastName. 'Ola Nordmann' → firstName='Ola', lastName='Nordmann'.",
     "- For travel expense prompts that mention daily allowance/per diem or itemized costs, include perDiemCompensations and costs.",
+    "- For payment tasks use /invoice/{id}/:payment (or /order/{id}/:invoice then /invoice/{id}/:payment if needed).",
+    "- For credit note tasks use /invoice/{id}/:createCreditNote.",
+    "- For voucher reversal tasks use /ledger/voucher/{id}/:reverse (not DELETE unless prompt asks to delete).",
     "- Do NOT invent fields. Only use field names listed above.",
     "- Do NOT include sendType, sendTypeEmail, or any undocumented fields.",
     "- For PUT requests: always GET the entity first to obtain its current id and version number.",
@@ -2201,7 +2532,21 @@ function withPreflightBodyDefaults(
   const productId = firstIdFromVars(vars, ["product_id", "productId", "product"]);
   const amountHint = firstNumberFromVars(vars, ["milestone_amount", "invoice_amount", "amount"]);
 
-  if (normalizedPath === "/project") {
+  if (isInvoicePaymentActionPath(normalizedPath)) {
+    setIfMissing("paymentDate", todayIsoDate());
+    if (!hasValue(next.amount) && hasValue(amountHint)) {
+      next.amount = amountHint;
+      changed = true;
+    }
+  } else if (isInvoiceCreditNoteActionPath(normalizedPath)) {
+    setIfMissing("date", todayIsoDate());
+    setIfMissing("reason", "Generated credit note");
+  } else if (isOrderInvoiceActionPath(normalizedPath)) {
+    setIfMissing("invoiceDate", todayIsoDate());
+  } else if (isVoucherReverseActionPath(normalizedPath)) {
+    setIfMissing("date", todayIsoDate());
+    setIfMissing("description", "Generated voucher reversal");
+  } else if (normalizedPath === "/project") {
     setIfMissing("name", generatedEntityName(path));
     setIfMissing("startDate", todayIsoDate());
     if (!hasValue(next.customer) && hasValue(customerId)) {
@@ -2914,6 +3259,7 @@ function withValidationFieldDefaults(
       case "orderDate":
       case "invoiceDate":
       case "invoiceDueDate":
+      case "paymentDate":
       case "deliveryDate":
       case "date":
       case "departureDate":
@@ -3042,6 +3388,24 @@ function withValidationFieldDefaults(
     setIfMissing("userType", defaultEmployeeUserType());
     setIfMissing("email", defaultEmployeeEmail);
     if (hasValue(departmentId)) setIfMissing("department", { id: departmentId });
+  }
+  if (isInvoicePaymentActionPath(normalizedPath)) {
+    setIfMissing("paymentDate", todayIsoDate());
+    if (!hasValue(next.amount) && hasValue(amountHint)) {
+      next.amount = amountHint;
+      changed = true;
+    }
+  }
+  if (isInvoiceCreditNoteActionPath(normalizedPath)) {
+    setIfMissing("date", todayIsoDate());
+    setIfMissing("reason", "Generated credit note");
+  }
+  if (isOrderInvoiceActionPath(normalizedPath)) {
+    setIfMissing("invoiceDate", todayIsoDate());
+  }
+  if (isVoucherReverseActionPath(normalizedPath)) {
+    setIfMissing("date", todayIsoDate());
+    setIfMissing("description", "Generated voucher reversal");
   }
   if (normalizedPath === "/travelExpense") {
     const patched = withTravelExpensePaymentTypeDefaults(next, vars);
