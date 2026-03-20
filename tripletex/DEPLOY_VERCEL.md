@@ -17,6 +17,10 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_API_KEY` (optional but recommended)
 - `TRIPLETEX_LLM_ATTEMPTS` (optional, default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (optional, default `25000`)
+- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (optional, default `3`; retries transient network/5xx/429 errors)
+- `TRIPLETEX_HTTP_RETRY_BACKOFF_MS` (optional, default `250`; exponential backoff base in ms)
+- `TRIPLETEX_VALIDATION_RETRIES` (optional, default `3`; per-step 422 repair retry rounds)
+- `TRIPLETEX_EMPLOYEE_USER_TYPE` (optional, default `STANDARD`; fallback user type for employee create/update repairs)
 - `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`)
 - `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`)
 - `TRIPLETEX_ENTITY_DATE_FROM` (optional, default `2000-01-01`; used for `/order` + `/invoice` list reads)
@@ -24,20 +28,20 @@ This project uses Vercel serverless functions:
 - `TRIPLETEX_DRY_RUN` (optional; `1|true|yes`)
 - `TRIPLETEX_DEBUG_ERRORS` (optional; `1` for verbose failure details)
 - `TRIPLETEX_LLM_DISABLED` (optional; `1` disables LLM and forces heuristics)
-- `TRIPLETEX_FAIL_HARD` (optional; `1` returns 500 on internal solver errors, default is fail-soft 200)
+- `TRIPLETEX_FAIL_HARD` (optional; `0` enables fail-soft 200 responses, default is fail-hard 500)
 - `TRIPLETEX_LOGGING_ENABLED` (optional; `0` disables structured trace logs, default enabled)
 - `TRIPLETEX_LOG_PAYLOADS` (optional; `1` logs truncated payload previews, default disabled)
 - `TRIPLETEX_LOG_MAX_CHARS` (optional; max payload preview chars, default `500`)
 
 Model routing (all optional):
 
-- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-5.2`)
-- `TRIPLETEX_MODEL_REASONING` (default `anthropic/claude-sonnet-4.5`)
-- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
-- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.2`)
+- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-5.4`)
+- `TRIPLETEX_MODEL_REASONING` (default `openai/gpt-5.4`)
+- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-3.1-pro-preview`)
+- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.4`)
 - `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated fallback list)
 - `TRIPLETEX_ENABLE_DIRECT_OPENAI_FALLBACK` (optional; `1` enables direct OpenAI fallback if gateway fails)
-- `TRIPLETEX_DIRECT_OPENAI_MODEL` (optional; default `gpt-4.1-mini`, used only when direct fallback enabled)
+- `TRIPLETEX_DIRECT_OPENAI_MODEL` (optional; default `gpt-5.4`, used only when direct fallback enabled)
 
 Optional Google Document AI extraction (recommended for PDFs/images):
 

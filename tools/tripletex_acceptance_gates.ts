@@ -659,6 +659,167 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
+    name: "executePlan repairs employee POST on 422 with userType+department defaults",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      let employeePostAttempts = 0;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/department") {
+          return jsonResponse(200, { values: [{ id: 838077, name: "Avdeling" }] });
+        }
+        if (method === "POST" && path === "/employee") {
+          employeePostAttempts += 1;
+          const employeeBody = body as Record<string, unknown>;
+          if (employeePostAttempts === 1 && employeeBody?.employmentDate) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ code: 16000, field: "employmentDate", message: "Feltet eksisterer ikke i objektet." }],
+            });
+          }
+          const department = employeeBody?.department as Record<string, unknown> | undefined;
+          if (!department?.id) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "department.id", message: "Feltet må fylles ut." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 1337 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "employee retries",
+          steps: [
+            {
+              method: "POST",
+              path: "/employee",
+              body: {
+                firstName: "Gate",
+                lastName: "Employee",
+                employmentDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const employeePosts = calls.filter((call) => call.method === "POST" && call.path === "/employee");
+        assert.equal(employeePosts.length, 2, "expected initial POST /employee + repaired retry");
+        const firstBody = employeePosts[0]?.body as Record<string, unknown>;
+        const secondBody = employeePosts[1]?.body as Record<string, unknown>;
+        assert(firstBody?.employmentDate, "first attempt should include unsupported employmentDate");
+        assert.equal(secondBody?.employmentDate, undefined, "second attempt should remove unsupported employmentDate");
+        assert.equal(secondBody?.userType, "STANDARD", "retry flow should set default userType");
+        assert.equal(
+          (secondBody?.department as Record<string, unknown> | undefined)?.id,
+          838077,
+          "retry flow should hydrate department.id",
+        );
+        assert.equal(
+          calls.filter((call) => call.method === "GET" && call.path === "/department").length,
+          1,
+          "expected one department lookup during retry enrichment",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "TripletexClient retries transient network failures",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const previousMaxAttempts = process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS;
+      const previousBackoff = process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS;
+      let attempts = 0;
+      globalThis.fetch = async (): Promise<Response> => {
+        attempts += 1;
+        if (attempts <= 2) {
+          throw new TypeError("fetch failed");
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS = "3";
+      process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS = "1";
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 2000,
+        });
+        const response = await client.request("POST", "/customer", {
+          body: { name: "Acme", isCustomer: true },
+        });
+        assert.equal((response as Record<string, unknown>)?.value ? 1 : 0, 1, "expected successful retry response");
+        assert.equal(attempts, 3, "expected 3 attempts after transient network failures");
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (previousMaxAttempts === undefined) delete process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS;
+        else process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS = previousMaxAttempts;
+        if (previousBackoff === undefined) delete process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS;
+        else process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS = previousBackoff;
+      }
+    },
+  });
+
+  gates.push({
+    name: "TripletexClient retries retryable HTTP status codes",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const previousMaxAttempts = process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS;
+      const previousBackoff = process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS;
+      let attempts = 0;
+      globalThis.fetch = async (): Promise<Response> => {
+        attempts += 1;
+        if (attempts === 1) {
+          return jsonResponse(502, { status: 502, message: "Bad gateway" });
+        }
+        return jsonResponse(201, { value: { id: 2 } });
+      };
+
+      process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS = "2";
+      process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS = "1";
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 2000,
+        });
+        const response = await client.request("POST", "/invoice", {
+          body: { customer: { id: 1 }, invoiceDate: "2026-03-19", invoiceDueDate: "2026-03-19" },
+        });
+        assert.equal((response as Record<string, unknown>)?.value ? 1 : 0, 1, "expected successful response after retry");
+        assert.equal(attempts, 2, "expected one retry on 502 response");
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (previousMaxAttempts === undefined) delete process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS;
+        else process.env.TRIPLETEX_HTTP_MAX_ATTEMPTS = previousMaxAttempts;
+        if (previousBackoff === undefined) delete process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS;
+        else process.env.TRIPLETEX_HTTP_RETRY_BACKOFF_MS = previousBackoff;
+      }
+    },
+  });
+
+  gates.push({
     name: "heuristic fallback produces valid order create flow",
     run: () => {
       const plan = heuristicPlan({

@@ -11,6 +11,8 @@ This folder contains the Tripletex challenge implementation and handover package
 - Task-aware model routing (OpenAI/Anthropic/Google model IDs via AI Gateway)
 - Optional Google Document AI extraction for PDF/image attachments
 - Tripletex API execution engine in `api/_lib/tripletex.ts`
+- Automatic 422 repair loop for common validation/mapping errors (including employee `userType`/`department` hydration)
+- Transient HTTP/network retry logic for Tripletex API calls
 - Optional `Bearer` API-key protection via `TRIPLETEX_API_KEY`
 - Vercel rewrites `/solve` and `/health` configured in `vercel.json`
 

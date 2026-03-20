@@ -439,6 +439,14 @@ function defaultEntityDateTo(): string {
   return process.env.TRIPLETEX_ENTITY_DATE_TO?.trim() || "2100-12-31";
 }
 
+function defaultEmployeeUserType(): "STANDARD" | "EXTENDED" | "NO_ACCESS" {
+  const configured = process.env.TRIPLETEX_EMPLOYEE_USER_TYPE?.trim().toUpperCase();
+  if (configured === "STANDARD" || configured === "EXTENDED" || configured === "NO_ACCESS") {
+    return configured;
+  }
+  return "STANDARD";
+}
+
 function toRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return { ...(value as Record<string, unknown>) };
@@ -1693,6 +1701,7 @@ function withPreflightBodyDefaults(
   const customerId = firstIdFromVars(vars, ["customer_id", "customerId", "customer"]);
   const employeeId = firstIdFromVars(vars, ["employee_id", "employeeId", "employee", "projectManager_id"]);
   const orderId = firstIdFromVars(vars, ["order_id", "orderId", "order"]);
+  const departmentId = firstIdFromVars(vars, ["department_id", "departmentId", "department"]);
 
   if (normalizedPath === "/project") {
     setIfMissing("name", generatedEntityName(path));
@@ -1729,6 +1738,16 @@ function withPreflightBodyDefaults(
       next.employee = { id: employeeId };
       changed = true;
     }
+  } else if (normalizedPath === "/employee") {
+    if (method === "POST") {
+      setIfMissing("firstName", "Generated");
+      setIfMissing("lastName", `Employee${Date.now().toString().slice(-6)}`);
+    }
+    setIfMissing("userType", defaultEmployeeUserType());
+    if (!hasValue(next.department) && hasValue(departmentId)) {
+      next.department = { id: departmentId };
+      changed = true;
+    }
   }
 
   return changed ? { body: next, changed } : { body, changed };
@@ -1759,6 +1778,12 @@ function validationFieldsFromError(error: unknown): string[] {
     if (message.includes("ansatt") || message.includes("employee")) {
       fields.push("employee");
     }
+    if (message.includes("brukertype") || message.includes("user type") || message.includes("usertype")) {
+      fields.push("userType");
+    }
+    if (message.includes("avdeling") || message.includes("department")) {
+      fields.push("department");
+    }
   }
   return [...new Set(fields)];
 }
@@ -1784,6 +1809,7 @@ function unknownMappingFieldsFromError(error: unknown): string[] {
       message.includes("unknown field") ||
       message.includes("ukjent felt") ||
       message.includes("does not exist") ||
+      message.includes("eksisterer ikke") ||
       message.includes("finnes ikke");
     if (!mappingError) continue;
     if (field) fields.push(field);
@@ -1946,6 +1972,44 @@ async function fetchOrCreateProductId(
   return undefined;
 }
 
+async function fetchOrCreateDepartmentId(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+  allowCreate: boolean,
+): Promise<unknown> {
+  const existing = cachedId(vars, "department");
+  if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, "department");
+  try {
+    const fetched = await client.request("GET", "/department", {
+      params: buildListParams("/department", lookup),
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      cacheId(vars, "department", id);
+      return id;
+    }
+  } catch {
+    // Ignore and continue.
+  }
+  if (!allowCreate) return undefined;
+  try {
+    const created = await client.request("POST", "/department", {
+      body: {
+        name: generatedEntityName("/department"),
+      },
+    });
+    const id = extractIdFromVarValue(primaryValue(created));
+    if (hasValue(id)) {
+      cacheId(vars, "department", id);
+      return id;
+    }
+  } catch {
+    // Ignore and continue.
+  }
+  return undefined;
+}
+
 async function ensureTemplateVariable(
   client: TripletexClient,
   vars: Record<string, unknown>,
@@ -1982,17 +2046,7 @@ async function ensureTemplateVariable(
       }
     }
   } else if (alias === "department") {
-    if (allowCreate) {
-      try {
-        const created = await client.request("POST", "/department", {
-          body: { name: generatedEntityName("/department") },
-        });
-        const id = extractIdFromVarValue(primaryValue(created));
-        if (hasValue(id)) cacheId(vars, "department", id);
-      } catch {
-        // Ignore.
-      }
-    }
+    await fetchOrCreateDepartmentId(client, vars, allowCreate);
   }
 
   return resolveVar(vars, templateVar) !== undefined;
@@ -2064,12 +2118,18 @@ async function fetchOrCreateEmployeeId(
   } catch {
     // Ignore and try create fallback.
   }
+  const departmentId = await fetchOrCreateDepartmentId(client, vars, true);
   try {
+    const createBody: Record<string, unknown> = {
+      firstName: "Generated",
+      lastName: `Employee${Date.now().toString().slice(-6)}`,
+      userType: defaultEmployeeUserType(),
+    };
+    if (hasValue(departmentId)) {
+      createBody.department = { id: departmentId };
+    }
     const created = await client.request("POST", "/employee", {
-      body: {
-        firstName: "Generated",
-        lastName: `Employee${Date.now().toString().slice(-6)}`,
-      },
+      body: createBody,
     });
     const id = extractIdFromVarValue(primaryValue(created));
     if (hasValue(id)) {
@@ -2148,10 +2208,16 @@ async function enrichVarsForValidationRetry(
     normalizedPath === "/project" ||
     normalizedPath === "/travelExpense";
   const needsOrder = roots.has("order") || roots.has("orderId") || roots.has("orders") || normalizedPath === "/invoice";
+  const needsDepartment =
+    roots.has("department") ||
+    roots.has("departmentId") ||
+    roots.has("userType") ||
+    normalizedPath === "/employee";
 
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
   if (needsEmployee) await fetchOrCreateEmployeeId(client, vars);
   if (needsOrder) await fetchOrCreateOrderId(client, vars);
+  if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
 }
 
 function withValidationFieldDefaults(
@@ -2223,6 +2289,9 @@ function withValidationFieldDefaults(
       case "departmentId":
         setIfMissing("departmentId", departmentId);
         break;
+      case "userType":
+        setIfMissing("userType", defaultEmployeeUserType());
+        break;
       case "project":
         if (hasValue(projectId)) setIfMissing("project", { id: projectId });
         break;
@@ -2256,6 +2325,10 @@ function withValidationFieldDefaults(
   }
   if (normalizedPath === "/order") {
     setIfMissing("orderDate", todayIsoDate());
+  }
+  if (normalizedPath === "/employee") {
+    setIfMissing("userType", defaultEmployeeUserType());
+    if (hasValue(departmentId)) setIfMissing("department", { id: departmentId });
   }
 
   return changed ? { body: next, changed } : { body, changed };
@@ -2315,43 +2388,52 @@ export async function executePlan(
       if (dryRun && step.method !== "GET") {
         response = { value: { id: count, dryRun: true } };
       } else {
-        try {
-          response = await client.request(step.method, path, {
-            params: (params ?? {}) as Record<string, unknown>,
-            body,
-          });
-        } catch (error) {
-          const retryFields = validationFieldsFromError(error);
-          const mappingFields = unknownMappingFieldsFromError(error);
-          if (retryFields.length > 0) {
-            await enrichVarsForValidationRetry(client, vars, path, retryFields);
+        const maxValidationRetries = Math.max(0, Number(process.env.TRIPLETEX_VALIDATION_RETRIES || "3"));
+        let validationRetryRounds = 0;
+        let latestRetryFields: string[] = [];
+        let latestRemovedFields: string[] = [];
+        while (true) {
+          try {
+            response = await client.request(step.method, path, {
+              params: (params ?? {}) as Record<string, unknown>,
+              body,
+            });
+            if (validationRetryRounds > 0) {
+              trace?.({
+                event: "plan_step_retry_success",
+                step: count,
+                method: step.method,
+                path,
+                retryFields: latestRetryFields,
+                removedFields: latestRemovedFields,
+              });
+            }
+            break;
+          } catch (error) {
+            const retryFields = validationFieldsFromError(error);
+            const mappingFields = unknownMappingFieldsFromError(error);
+            if (retryFields.length > 0) {
+              await enrichVarsForValidationRetry(client, vars, path, retryFields);
+            }
+            const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
+            const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
+            const shouldRetry = sanitized.changed || repaired.changed;
+            if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
+            if (validationRetryRounds >= maxValidationRetries) throw error;
+            validationRetryRounds += 1;
+            latestRetryFields = retryFields;
+            latestRemovedFields = sanitized.removedFields;
+            trace?.({
+              event: "plan_step_retry_on_validation",
+              step: count,
+              method: step.method,
+              path,
+              retryFields,
+              removedFields: sanitized.removedFields,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            body = repaired.body;
           }
-          const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
-          const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
-          const shouldRetry = sanitized.changed || repaired.changed;
-          if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
-          trace?.({
-            event: "plan_step_retry_on_validation",
-            step: count,
-            method: step.method,
-            path,
-            retryFields,
-            removedFields: sanitized.removedFields,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          body = repaired.body;
-          response = await client.request(step.method, path, {
-            params: (params ?? {}) as Record<string, unknown>,
-            body,
-          });
-          trace?.({
-            event: "plan_step_retry_success",
-            step: count,
-            method: step.method,
-            path,
-            retryFields,
-            removedFields: sanitized.removedFields,
-          });
         }
       }
       trace?.({

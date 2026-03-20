@@ -191,13 +191,17 @@ Execution guard behavior:
 
 ### Optional planner/runtime controls
 
-- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-5.2`)
-- `TRIPLETEX_MODEL_REASONING` (default `anthropic/claude-sonnet-4.5`)
-- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-2.5-flash`)
-- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.2`)
+- `TRIPLETEX_MODEL_DEFAULT` (default `openai/gpt-5.4`)
+- `TRIPLETEX_MODEL_REASONING` (default `openai/gpt-5.4`)
+- `TRIPLETEX_MODEL_DOC_FAST` (default `google/gemini-3.1-pro-preview`)
+- `TRIPLETEX_MODEL_DOC_COMPLEX` (default `openai/gpt-5.4`)
 - `TRIPLETEX_GATEWAY_FALLBACK_MODELS` (optional comma-separated model IDs)
 - `TRIPLETEX_LLM_ATTEMPTS` (default `3`)
 - `TRIPLETEX_HTTP_TIMEOUT_MS` (default `25000`)
+- `TRIPLETEX_HTTP_MAX_ATTEMPTS` (default `3`; retries transient Tripletex network/5xx/429 failures)
+- `TRIPLETEX_HTTP_RETRY_BACKOFF_MS` (default `250`; exponential backoff base for HTTP retries)
+- `TRIPLETEX_VALIDATION_RETRIES` (default `3`; per-step retries for 422 repair loops)
+- `TRIPLETEX_EMPLOYEE_USER_TYPE` (default `STANDARD`; used when employee payload is missing userType)
 - `TRIPLETEX_LEDGER_DATE_FROM` (optional, default `2000-01-01`; used when ledger list calls omit date range)
 - `TRIPLETEX_LEDGER_DATE_TO` (optional, default `2100-12-31`; used when ledger list calls omit date range)
 - `TRIPLETEX_ENTITY_DATE_FROM` (optional, default `2000-01-01`; used when order/invoice list calls omit date range)
@@ -206,7 +210,7 @@ Execution guard behavior:
 - `TRIPLETEX_DEBUG_ERRORS` (`1` to include verbose details in 500 responses)
 - `TRIPLETEX_API_KEY` (Bearer key for endpoint protection)
 - `TRIPLETEX_LLM_DISABLED` (`1` to bypass LLM path)
-- `TRIPLETEX_FAIL_HARD` (`1` to return 500 on internal solver errors; default is fail-soft 200)
+- `TRIPLETEX_FAIL_HARD` (`0` to force fail-soft; default is fail-hard 500)
 - `TRIPLETEX_LOGGING_ENABLED` (`0` to disable structured trace logs; default enabled)
 - `TRIPLETEX_LOG_PAYLOADS` (`1` to include truncated payload previews in API logs; default logs schema/shape only)
 - `TRIPLETEX_LOG_MAX_CHARS` (max per-string preview chars when payload logging is enabled; default `500`)
@@ -305,8 +309,8 @@ Priority 3:
 - LLM planning unavailable/failing:
   - retries up to `TRIPLETEX_LLM_ATTEMPTS`, then heuristic planner
 - Internal execution failure:
-  - default fail-soft: returns `200 {"status":"completed"}`
-  - debug fail-hard mode: set `TRIPLETEX_FAIL_HARD=1` for `500` diagnostics
+  - default fail-hard: returns `500` with diagnostic details (if enabled)
+  - optional fail-soft mode: set `TRIPLETEX_FAIL_HARD=0` to return `200 {"status":"completed"}`
 - DocAI unavailable/misconfigured/runtime errors:
   - non-fatal; attachment falls back to metadata extraction
   - trace log captures failure message and fallback reason
@@ -314,6 +318,9 @@ Priority 3:
   - metadata fallback without blocking solve flow
 - Unexpected Tripletex response wrappers:
   - executor supports both `value` and `values` response patterns
+- Employee create/update 422s in sandbox:
+  - common requirements are `userType` and `department.id`
+  - executor now auto-fills `userType` and hydrates/creates `department` id during validation retries
 
 ## 8. Operational Runbook
 
