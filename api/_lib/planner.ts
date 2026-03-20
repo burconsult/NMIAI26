@@ -591,47 +591,9 @@ export function validatePlanForPrompt(prompt: string, plan: ExecutionPlan): stri
         `step ${stepNumber}: mutating '${contract.entity}' is outside prompt scope (requested: ${requestedList}; allowed incl. prerequisites: ${allowedList})`,
       );
     }
-    const stepParams = toRecord(step.params);
-    if (
-      step.method === "GET" &&
-      !pathHasIdSegment(step.path, contract.basePath) &&
-      (contract.basePath === "/ledger/posting" || contract.basePath === "/ledger/voucher")
-    ) {
-      if (stepParams.dateFrom === undefined || stepParams.dateFrom === null || String(stepParams.dateFrom).trim() === "") {
-        issues.push(`step ${stepNumber}: GET ${contract.basePath} must include query param dateFrom`);
-      }
-      if (stepParams.dateTo === undefined || stepParams.dateTo === null || String(stepParams.dateTo).trim() === "") {
-        issues.push(`step ${stepNumber}: GET ${contract.basePath} must include query param dateTo`);
-      }
-    }
-    if (step.method === "GET" && !pathHasIdSegment(step.path, contract.basePath) && contract.basePath === "/order") {
-      if (
-        stepParams.orderDateFrom === undefined ||
-        stepParams.orderDateFrom === null ||
-        String(stepParams.orderDateFrom).trim() === ""
-      ) {
-        issues.push(`step ${stepNumber}: GET /order must include query param orderDateFrom`);
-      }
-      if (stepParams.orderDateTo === undefined || stepParams.orderDateTo === null || String(stepParams.orderDateTo).trim() === "") {
-        issues.push(`step ${stepNumber}: GET /order must include query param orderDateTo`);
-      }
-    }
-    if (step.method === "GET" && !pathHasIdSegment(step.path, contract.basePath) && contract.basePath === "/invoice") {
-      if (
-        stepParams.invoiceDateFrom === undefined ||
-        stepParams.invoiceDateFrom === null ||
-        String(stepParams.invoiceDateFrom).trim() === ""
-      ) {
-        issues.push(`step ${stepNumber}: GET /invoice must include query param invoiceDateFrom`);
-      }
-      if (
-        stepParams.invoiceDateTo === undefined ||
-        stepParams.invoiceDateTo === null ||
-        String(stepParams.invoiceDateTo).trim() === ""
-      ) {
-        issues.push(`step ${stepNumber}: GET /invoice must include query param invoiceDateTo`);
-      }
-    }
+    // Date params for GET list calls (ledger, order, invoice) are NOT validated here
+    // because the executor auto-injects them via ensurePlannerSafeQueryParams.
+    // Blocking plans for missing date params wastes LLM retry attempts.
     if (step.method === "POST" || step.method === "PUT") {
       const isTemplateString = typeof step.body === "string" && step.body.includes("{{");
       if (step.body === undefined || step.body === null || (typeof step.body !== "object" && !isTemplateString)) {
@@ -1205,6 +1167,27 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   }
 
   if (readIntent) {
+    const readEntity = detectPrimaryEntity(lower);
+    if (readEntity) {
+      const contract = ENDPOINT_CONTRACTS.find((c) => c.entity === readEntity);
+      if (contract) {
+        const readParams: Record<string, unknown> = { count: 1 };
+        if (contract.basePath === "/ledger/posting" || contract.basePath === "/ledger/voucher") {
+          readParams.dateFrom = defaultLedgerDateFrom();
+          readParams.dateTo = defaultLedgerDateTo();
+        } else if (contract.basePath === "/order") {
+          readParams.orderDateFrom = defaultEntityDateFrom();
+          readParams.orderDateTo = defaultEntityDateTo();
+        } else if (contract.basePath === "/invoice") {
+          readParams.invoiceDateFrom = defaultEntityDateFrom();
+          readParams.invoiceDateTo = defaultEntityDateTo();
+        }
+        return {
+          summary: `Heuristic detected ${readEntity} read flow`,
+          steps: [{ method: "GET", path: contract.basePath, params: readParams, reason: `Read ${readEntity} from detected entity` }],
+        };
+      }
+    }
     return {
       summary: "Heuristic generic read flow",
       steps: [
@@ -1218,17 +1201,144 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
+  const detectedEntity = detectPrimaryEntity(lower);
+  if (detectedEntity && createIntent) {
+    return buildGenericCreatePlan(detectedEntity, prompt, quoted, capitalized, email);
+  }
+
+  if (detectedEntity && deleteIntent) {
+    const contract = ENDPOINT_CONTRACTS.find((c) => c.entity === detectedEntity);
+    if (contract && contract.methods.includes("DELETE")) {
+      if (numericId) {
+        return {
+          summary: `Heuristic ${detectedEntity} delete by id`,
+          steps: [{ method: "DELETE", path: `${contract.basePath}/${numericId}` }],
+        };
+      }
+      const listParams: Record<string, unknown> = { count: 1, fields: "id" };
+      if (contract.basePath === "/ledger/voucher") {
+        listParams.dateFrom = defaultLedgerDateFrom();
+        listParams.dateTo = defaultLedgerDateTo();
+      }
+      return {
+        summary: `Heuristic ${detectedEntity} fetch-and-delete`,
+        steps: [
+          { method: "GET", path: contract.basePath, params: listParams, saveAs: detectedEntity, reason: `Fetch ${detectedEntity} id` },
+          { method: "DELETE", path: `${contract.basePath}/{{${detectedEntity}_id}}`, reason: `Delete ${detectedEntity}` },
+        ],
+      };
+    }
+  }
+
+  if (detectedEntity) {
+    return buildGenericCreatePlan(detectedEntity, prompt, quoted, capitalized, email);
+  }
+
   return {
-    summary: "Heuristic generic fallback read flow",
+    summary: "Heuristic generic fallback — create customer from prompt",
     steps: [
       {
-        method: "GET",
-        path: "/employee",
-        params: { count: 1, fields: "id,firstName,lastName,email" },
-        reason: "Last-resort safe probe when prompt parsing fails",
+        method: "POST",
+        path: "/customer",
+        body: { name: quoted ?? capitalized ?? `Generated Customer ${Date.now().toString().slice(-6)}`, isCustomer: true, email: email ?? undefined },
+        saveAs: "customer",
+        reason: "Last-resort create when no entity could be identified",
       },
     ],
   };
+}
+
+function detectPrimaryEntity(lowerPrompt: string): NormalizedEntity | null {
+  let best: { entity: NormalizedEntity; position: number } | null = null;
+  for (const entry of ENTITY_KEYWORDS) {
+    for (const keyword of entry.keywords) {
+      if (!promptContainsKeyword(lowerPrompt, keyword.toLowerCase())) continue;
+      const position = lowerPrompt.indexOf(keyword.toLowerCase());
+      if (position >= 0 && (best === null || position < best.position)) {
+        best = { entity: entry.entity, position };
+      }
+    }
+  }
+  return best?.entity ?? null;
+}
+
+function buildGenericCreatePlan(
+  entity: NormalizedEntity,
+  prompt: string,
+  quoted: string | null,
+  capitalized: string | null,
+  email: string | null,
+): ExecutionPlan {
+  const contract = ENDPOINT_CONTRACTS.find((c) => c.entity === entity);
+  if (!contract || !contract.methods.includes("POST")) {
+    return {
+      summary: `Heuristic ${entity} read fallback (POST not available)`,
+      steps: [{ method: "GET", path: contract?.basePath ?? "/employee", params: { count: 1 }, reason: `Read ${entity}` }],
+    };
+  }
+
+  switch (entity) {
+    case "employee": {
+      const person = splitPersonName(quoted ?? capitalized);
+      return {
+        summary: "Heuristic detected employee create",
+        steps: [{ method: "POST", path: "/employee", body: { firstName: person.firstName, lastName: person.lastName, email: email ?? undefined }, saveAs: "employee" }],
+      };
+    }
+    case "customer":
+      return {
+        summary: "Heuristic detected customer create",
+        steps: [{ method: "POST", path: "/customer", body: { name: quoted ?? capitalized ?? generatedEntityName("/customer"), isCustomer: true, email: email ?? undefined }, saveAs: "customer" }],
+      };
+    case "department":
+      return {
+        summary: "Heuristic detected department create",
+        steps: [{ method: "POST", path: "/department", body: { name: quoted ?? generatedEntityName("/department") }, saveAs: "department" }],
+      };
+    case "product":
+      return {
+        summary: "Heuristic detected product create",
+        steps: [{ method: "POST", path: "/product", body: { name: quoted ?? capitalized ?? generatedEntityName("/product") }, saveAs: "product" }],
+      };
+    case "project":
+      return {
+        summary: "Heuristic detected project create",
+        steps: [
+          { method: "GET", path: "/employee", params: { count: 1, fields: "id" }, saveAs: "manager", reason: "Find project manager" },
+          { method: "POST", path: "/project", body: { name: quoted ?? capitalized ?? generatedEntityName("/project"), startDate: todayIsoDate(), projectManager: { id: "{{manager_id}}" } }, saveAs: "project" },
+        ],
+      };
+    case "order":
+      return {
+        summary: "Heuristic detected order create",
+        steps: [
+          { method: "GET", path: "/customer", params: { count: 1, fields: "id" }, saveAs: "customer", reason: "Find customer for order" },
+          { method: "POST", path: "/order", body: { customer: { id: "{{customer_id}}" }, orderDate: todayIsoDate(), deliveryDate: todayIsoDate() }, saveAs: "order" },
+        ],
+      };
+    case "invoice":
+      return {
+        summary: "Heuristic detected invoice create",
+        steps: [
+          { method: "GET", path: "/customer", params: { count: 1, fields: "id" }, saveAs: "customer", reason: "Find customer for invoice" },
+          { method: "GET", path: "/order", params: { count: 1, fields: "id", orderDateFrom: defaultEntityDateFrom(), orderDateTo: defaultEntityDateTo() }, saveAs: "order", reason: "Find order for invoice" },
+          { method: "POST", path: "/invoice", body: { customer: { id: "{{customer_id}}" }, invoiceDate: todayIsoDate(), invoiceDueDate: todayIsoDate(), orders: [{ id: "{{order_id}}" }] }, saveAs: "invoice" },
+        ],
+      };
+    case "travelExpense":
+      return {
+        summary: "Heuristic detected travel expense create",
+        steps: [
+          { method: "GET", path: "/employee", params: { count: 1, fields: "id" }, saveAs: "employee", reason: "Find employee for travel expense" },
+          { method: "POST", path: "/travelExpense", body: { employee: { id: "{{employee_id}}" }, date: todayIsoDate(), title: quoted ?? "Generated travel expense" }, saveAs: "travelExpense" },
+        ],
+      };
+    default:
+      return {
+        summary: `Heuristic ${entity} generic create attempt`,
+        steps: [{ method: "POST", path: contract.basePath, body: { name: quoted ?? generatedEntityName(contract.basePath) }, saveAs: entity }],
+      };
+  }
 }
 
 function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): string {
@@ -1290,40 +1400,66 @@ function buildPlanningPrompt(payload: SolveRequest, summaries: AttachmentSummary
     : "- none";
 
   return [
-    "You are a Tripletex API planner. Return only an execution plan object.",
-    "Use minimal, deterministic API calls.",
-    "Challenge endpoint/method contract:",
-    "- /employee: GET, POST, PUT (PUT must use /employee/{id})",
-    "- /customer: GET, POST, PUT (PUT must use /customer/{id})",
+    "You are a Tripletex API planner for the NM i AI accounting challenge.",
+    "Return an execution plan object with summary and steps.",
+    "Use minimal, deterministic API calls. Avoid unnecessary requests.",
+    "",
+    "ENDPOINT CONTRACT (only these paths and methods are allowed):",
+    "- /employee: GET, POST, PUT (PUT requires /employee/{id})",
+    "- /customer: GET, POST, PUT (PUT requires /customer/{id})",
     "- /product: GET, POST",
     "- /invoice: GET, POST",
     "- /order: GET, POST",
-    "- /travelExpense: GET, POST, PUT, DELETE (PUT/DELETE must use /travelExpense/{id})",
+    "- /travelExpense: GET, POST, PUT, DELETE (PUT/DELETE require /travelExpense/{id})",
     "- /project: GET, POST",
     "- /department: GET, POST",
     "- /ledger/account: GET",
     "- /ledger/posting: GET",
-    "- /ledger/voucher: GET, POST, DELETE (DELETE must use /ledger/voucher/{id})",
-    "- GET /ledger/posting and GET /ledger/voucher list calls must include dateFrom and dateTo (YYYY-MM-DD).",
-    "- GET /order list calls must include orderDateFrom and orderDateTo (YYYY-MM-DD).",
-    "- GET /invoice list calls must include invoiceDateFrom and invoiceDateTo (YYYY-MM-DD).",
-    "Use only relative endpoint paths, for example /employee.",
-    "DELETE requests must use ID in URL path.",
-    "POST and PUT requests must include JSON body.",
-    "GET list responses are typically wrapped as { fullResultSize: N, values: [...] }.",
-    "For created entities, set saveAs and use templating in later steps with {{alias_id}} or {{alias.field}}.",
-    "If prompt is read-only (e.g. list/show/find/get/do not modify), use GET-only steps and never mutate data.",
-    "Use query tips for efficient reads: fields, count, from.",
-    "Use `count` for list endpoints to limit scope (typically count=1).",
-    "List responses may be wrapped as { values: [...] } or single { value: {...} }.",
-    "Do not include auth details in the plan.",
+    "- /ledger/voucher: GET, POST, DELETE (DELETE requires /ledger/voucher/{id})",
+    "",
+    "REQUIRED QUERY PARAMS FOR LIST CALLS:",
+    "- GET /ledger/posting: dateFrom, dateTo (YYYY-MM-DD)",
+    "- GET /ledger/voucher: dateFrom, dateTo (YYYY-MM-DD)",
+    "- GET /order: orderDateFrom, orderDateTo (YYYY-MM-DD)",
+    "- GET /invoice: invoiceDateFrom, invoiceDateTo (YYYY-MM-DD)",
+    "- All list GETs: include count (usually 1) and from (usually 0)",
+    "",
+    "REQUIRED BODY FIELDS FOR POST (use ONLY these field names):",
+    "- POST /employee: { firstName, lastName } — optional: email, dateOfBirth, employmentDate",
+    "- POST /customer: { name, isCustomer: true } — optional: email, phoneNumber, organizationNumber",
+    "- POST /product: { name } — optional: number, costExcludingVatCurrency, priceExcludingVatCurrency",
+    "- POST /department: { name } — optional: departmentNumber",
+    "- POST /project: { name, startDate (YYYY-MM-DD), projectManager: { id } } — get a manager first via GET /employee",
+    "- POST /order: { customer: { id }, orderDate (YYYY-MM-DD), deliveryDate (YYYY-MM-DD) } — optional: orderLines: [{ product: { id }, count }]",
+    "- POST /invoice: { customer: { id }, invoiceDate (YYYY-MM-DD), invoiceDueDate (YYYY-MM-DD), orders: [{ id }] } — create order first if needed",
+    "- POST /travelExpense: { employee: { id }, date (YYYY-MM-DD) } — optional: title, description",
+    "- POST /ledger/voucher: { date (YYYY-MM-DD), description } — optional: postings: [{ amount, account: { id } }]",
+    "",
+    "REQUIRED BODY FIELDS FOR PUT (include id in path AND body):",
+    "- PUT /employee/{id}: { id, version, firstName, lastName } — fetch first with GET to get id+version",
+    "- PUT /customer/{id}: { id, version, name } — fetch first with GET to get id+version",
+    "- PUT /travelExpense/{id}: { id, version } — fetch first with GET to get id+version",
+    "",
+    "CRITICAL RULES:",
+    "- Do NOT invent fields. Only use field names listed above.",
+    "- Do NOT include sendType, sendTypeEmail, or any undocumented fields.",
+    "- For PUT requests: always GET the entity first to obtain its current id and version number.",
+    "- Use saveAs on any step whose result you need later. Reference with {{alias_id}} or {{alias.field}}.",
+    "- If the prompt is read-only (list/show/find/get), use GET only.",
+    "- Responses wrap as { value: {...} } or { values: [...] }.",
+    "- Use relative paths only (e.g. /employee, not https://...).",
+    "- Do not include auth details.",
+    "",
+    "MULTI-LANGUAGE: Prompts may be in Norwegian (nb/nn), English, Spanish, Portuguese, German, or French.",
+    "Common Norwegian terms: opprett=create, slett=delete, ansatt=employee, kunde=customer, avdeling=department,",
+    "prosjekt=project, faktura=invoice, ordre=order, produkt=product, reiseregning=travel expense, bilag=voucher.",
     "",
     `Task prompt:\n${payload.prompt}`,
     "",
     `Attachments:\n${attachmentsText}`,
     "",
-    `Previous execution error: ${previousError ?? "none"}`,
-  ].join("\n");
+    previousError ? `Previous execution error (fix this issue):\n${previousError}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 export async function llmPlan(

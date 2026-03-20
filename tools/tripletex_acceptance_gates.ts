@@ -122,28 +122,26 @@ async function runGates(): Promise<void> {
   }
 
   gates.push({
-    name: "validatePlanForPrompt rejects GET /order without required date range",
+    name: "validatePlanForPrompt allows GET /order without date range (executor auto-injects)",
     run: () => {
       const plan: ExecutionPlan = {
-        summary: "bad order read",
+        summary: "order read without dates",
         steps: [{ method: "GET", path: "/order", params: { count: 1 } }],
       };
       const issues = validatePlanForPrompt("List one order without modifying anything", plan);
-      assert(issues.some((issue) => issue.includes("orderDateFrom")), `missing expected issue: ${issues.join(" | ")}`);
-      assert(issues.some((issue) => issue.includes("orderDateTo")), `missing expected issue: ${issues.join(" | ")}`);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
     },
   });
 
   gates.push({
-    name: "validatePlanForPrompt rejects GET /invoice without required date range",
+    name: "validatePlanForPrompt allows GET /invoice without date range (executor auto-injects)",
     run: () => {
       const plan: ExecutionPlan = {
-        summary: "bad invoice read",
+        summary: "invoice read without dates",
         steps: [{ method: "GET", path: "/invoice", params: { count: 1 } }],
       };
       const issues = validatePlanForPrompt("List one invoice without modifying anything", plan);
-      assert(issues.some((issue) => issue.includes("invoiceDateFrom")), `missing expected issue: ${issues.join(" | ")}`);
-      assert(issues.some((issue) => issue.includes("invoiceDateTo")), `missing expected issue: ${issues.join(" | ")}`);
+      assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
     },
   });
 
@@ -569,6 +567,81 @@ async function runGates(): Promise<void> {
       assert(plan.steps.some((step) => step.method === "POST" && step.path === "/invoice"), "expected POST /invoice in heuristic plan");
       const issues = validatePlanForPrompt("Create invoice for customer ACME", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects Norwegian employee create prompt",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Opprett en ansatt med navn Kari Nordmann og e-post kari@firma.no",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/employee"), "expected POST /employee");
+      const body = plan.steps.find((step) => step.method === "POST")?.body as Record<string, unknown>;
+      assert(body?.firstName || body?.lastName, "expected name fields in body");
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects Spanish customer create prompt",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Crear un cliente llamado Acme SA con correo info@acme.es",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/customer"), "expected POST /customer");
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects department via generic entity detection",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Erstellen Sie eine Abteilung namens Verkauf",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/department"), "expected POST /department");
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects project create and includes prerequisites",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Opprett prosjekt Bygg 2026",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/project"), "expected POST /project");
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects Norwegian travel expense delete",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Slett reiseregning 12345",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "DELETE"), "expected DELETE step");
+    },
+  });
+
+  gates.push({
+    name: "heuristic generic fallback still produces a plan with steps",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt: "Do something with the accounting system",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.length >= 1, "expected at least one step in generic fallback");
+      assert(plan.steps[0]?.method === "POST", "expected a POST step as last-resort create");
     },
   });
 

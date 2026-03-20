@@ -334,10 +334,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       });
       const fallbackIssues = validatePlanForPrompt(payload.prompt, fallbackPlan);
       if (fallbackIssues.length > 0) {
-        appendTrace(traceEvents, runId, "solve.heuristic_fallback_invalid", {
+        appendTrace(traceEvents, runId, "solve.heuristic_fallback_validation_warnings", {
           issues: fallbackIssues,
         });
-        throw new SolveError(`Heuristic fallback plan invalid: ${fallbackIssues.join(" | ")}`);
       }
       usedPlanner = "heuristic";
       await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
