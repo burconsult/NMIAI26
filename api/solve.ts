@@ -10,6 +10,13 @@ import {
   type PlannerTraceEvent,
 } from "./_lib/planner.js";
 import { solveRequestSchema } from "./_lib/schemas.js";
+import {
+  extractTaskSpec,
+  heuristicExtract,
+  compilePlan,
+  verifyOutcome,
+  type TaskSpec,
+} from "./_lib/task_spec.js";
 import { TripletexClient, TripletexError, type TripletexCallLogEvent } from "./_lib/tripletex.js";
 
 export const config = {
@@ -316,70 +323,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       })),
     });
 
-    const maxAttempts = Math.max(1, Number(process.env.TRIPLETEX_LLM_ATTEMPTS || "3"));
     const llmDisabled = process.env.TRIPLETEX_LLM_DISABLED === "1";
-    let previousError = "";
-    let usedPlanner = "heuristic";
-    const llmAttemptErrors: string[] = [];
     const failHard = process.env.TRIPLETEX_FAIL_HARD === "1";
+    let usedPlanner = "unknown";
+    const attemptErrors: string[] = [];
+
     try {
+      // ── Stage 1: Extract TaskSpec (LLM or heuristic) ──
+      let spec: TaskSpec | null = null;
+
       if (!llmDisabled) {
-        for (let i = 0; i < maxAttempts; i += 1) {
-          appendTrace(traceEvents, runId, "solve.llm_attempt_start", { attempt: i + 1, maxAttempts });
-          try {
-            const plan = await llmPlan(payload, attachments, previousError || undefined, (event) =>
-              tracePlanner(traceEvents, runId, event),
-            );
-            const planIssues = validatePlanForPrompt(payload.prompt, plan);
-            const blockingIssues = planIssues.filter((issue) => isBlockingPlanIssue(issue));
-            if (blockingIssues.length > 0) {
-              tracePlanner(traceEvents, runId, {
-                event: "plan_validation_failed",
-                error: blockingIssues.join(" | "),
-              });
-              throw new SolveError(`Plan validation failed: ${blockingIssues.join(" | ")}`);
-            }
-            if (planIssues.length > 0) {
-              tracePlanner(traceEvents, runId, {
-                event: "plan_validation_failed",
-                error: `non-blocking issues: ${planIssues.join(" | ")}`,
-              });
-            }
-            tracePlanner(traceEvents, runId, {
-              event: "plan_validation_passed",
-              totalSteps: plan.steps.length,
-            });
-            await executePlan(client, plan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
-            usedPlanner = "vercel-ai-sdk";
-            appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner, llmAttempt: i + 1 });
-            res.status(200).json({ status: "completed" });
-            return;
-          } catch (error) {
-            previousError = formatAttemptError(error);
-            llmAttemptErrors.push(previousError);
-            appendTrace(traceEvents, runId, "solve.llm_attempt_failed", {
-              attempt: i + 1,
-              error: previousError,
-            });
-            if (i === maxAttempts - 1) break;
-          }
+        try {
+          appendTrace(traceEvents, runId, "solve.extract_start", { method: "llm" });
+          spec = await extractTaskSpec(payload, attachments);
+          appendTrace(traceEvents, runId, "solve.extract_success", {
+            method: "llm",
+            operation: spec.operation,
+            entity: spec.entity,
+            values: JSON.stringify(spec.values).slice(0, 300),
+          });
+          usedPlanner = "taskspec-llm";
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          attemptErrors.push(`taskspec-llm: ${msg}`);
+          appendTrace(traceEvents, runId, "solve.extract_failed", { method: "llm", error: msg });
         }
       }
 
-      const fallbackPlan = heuristicPlan(payload);
-      appendTrace(traceEvents, runId, "solve.heuristic_fallback", {
-        summary: fallbackPlan.summary,
-        steps: fallbackPlan.steps.length,
-      });
-      const fallbackIssues = validatePlanForPrompt(payload.prompt, fallbackPlan);
-      if (fallbackIssues.length > 0) {
-        appendTrace(traceEvents, runId, "solve.heuristic_fallback_validation_warnings", {
-          issues: fallbackIssues,
+      if (!spec) {
+        appendTrace(traceEvents, runId, "solve.extract_start", { method: "heuristic" });
+        spec = heuristicExtract(payload);
+        appendTrace(traceEvents, runId, "solve.extract_success", {
+          method: "heuristic",
+          operation: spec.operation,
+          entity: spec.entity,
         });
+        usedPlanner = "taskspec-heuristic";
       }
-      usedPlanner = "heuristic";
-      await executePlan(client, fallbackPlan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
-      appendTrace(traceEvents, runId, "solve.completed", { planner: usedPlanner || "heuristic" });
+
+      // ── Stage 2: Compile deterministic plan from TaskSpec ──
+      const plan = compilePlan(spec);
+      appendTrace(traceEvents, runId, "solve.plan_compiled", {
+        summary: plan.summary,
+        steps: plan.steps.length,
+        operation: spec.operation,
+        entity: spec.entity,
+      });
+
+      // ── Stage 3: Execute plan ──
+      await executePlan(client, plan, dryRun, (event) => tracePlanner(traceEvents, runId, event));
+
+      // ── Stage 4: Verify postcondition ──
+      const verification = await verifyOutcome(client, spec, null);
+      appendTrace(traceEvents, runId, "solve.verified", {
+        verified: verification.verified,
+        detail: verification.detail,
+      });
+
+      appendTrace(traceEvents, runId, "solve.completed", {
+        planner: usedPlanner,
+        verified: verification.verified,
+      });
       res.status(200).json({ status: "completed" });
       return;
     } catch (error) {
@@ -391,7 +395,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         prompt: promptPreview,
         planner: usedPlanner,
         error: errorMessage,
-        llmAttemptErrors,
+        attemptErrors,
         kind: error instanceof TripletexError ? "tripletex" : error instanceof SolveError ? "solver" : "unexpected",
         tripletex:
           error instanceof TripletexError
@@ -407,41 +411,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         planner: usedPlanner,
         error: errorMessage,
         failHard,
-        llmAttemptErrors,
+        attemptErrors,
       });
 
-      const mutatingFailure = isMutatingExecutionFailure(error);
       if (!failHard) {
-        appendTrace(traceEvents, runId, "solve.completed_fail_soft", {
-          error: errorMessage,
-          mutatingFailure,
-        });
+        appendTrace(traceEvents, runId, "solve.completed_fail_soft", { error: errorMessage });
         res.status(200).json({ status: "completed" });
         return;
       }
 
-      if (error instanceof TripletexError) {
-        res.status(500).json({
-          error: "Tripletex execution failed",
-          planner: usedPlanner,
-          endpoint: error.endpoint,
-          statusCode: error.statusCode,
-          details: debug ? error.responseBody : undefined,
-        });
-        return;
-      }
-      if (error instanceof SolveError) {
-        res.status(500).json({
-          error: "Solver failed",
-          planner: usedPlanner,
-          details: debug ? { message: error.message, llmAttemptErrors } : undefined,
-        });
-        return;
-      }
       res.status(500).json({
-        error: "Unexpected error",
+        error: "Solver failed",
         planner: usedPlanner,
-        details: debug ? { message: error instanceof Error ? error.message : String(error), llmAttemptErrors } : undefined,
+        details: debug ? { message: errorMessage, attemptErrors } : undefined,
       });
       return;
     }
