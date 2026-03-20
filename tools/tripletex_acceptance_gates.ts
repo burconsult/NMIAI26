@@ -627,6 +627,208 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
+    name: "executePlan retries invoice POST on 422 without field hints",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      let invoiceAttempts = 0;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") return jsonResponse(200, { values: [{ id: 4001 }] });
+        if (method === "GET" && path === "/order") return jsonResponse(200, { values: [{ id: 4002 }] });
+        if (method === "POST" && path === "/invoice") {
+          invoiceAttempts += 1;
+          const invoiceBody = body as Record<string, unknown>;
+          const orders = invoiceBody?.orders as Array<Record<string, unknown>> | undefined;
+          if (invoiceAttempts === 1) {
+            return jsonResponse(422, {
+              status: 422,
+              message: "Validation failed",
+              validationMessages: [],
+            });
+          }
+          if (!Array.isArray(orders) || orders.length === 0) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "orders", message: "Kan ikke være tom." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 4999 } });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "invoice retry without explicit fields",
+          steps: [
+            { method: "GET", path: "/customer", params: { count: 1, fields: "id" }, saveAs: "customer" },
+            { method: "GET", path: "/order", params: { count: 1, fields: "id", orderDateFrom: "2026-01-01", orderDateTo: "2026-12-31" }, saveAs: "order" },
+            {
+              method: "POST",
+              path: "/invoice",
+              body: {
+                customer: { id: "{{customer_id}}" },
+                invoiceDate: "2026-03-19",
+                invoiceDueDate: "2026-03-19",
+              },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const invoicePosts = calls.filter((call) => call.method === "POST" && call.path === "/invoice");
+        assert.equal(invoicePosts.length, 2, "expected invoice POST retry when first 422 has no field hints");
+        const secondBody = invoicePosts[1]?.body as Record<string, unknown>;
+        assert(Array.isArray(secondBody?.orders), "retry should inject orders array");
+        assert.equal((secondBody.orders as Array<Record<string, unknown>>)[0]?.id, 4002, "retry should use saved order id");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "executePlan handles fixed-price project milestone create flow failures",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      let orderHadLines = false;
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const path = url.pathname;
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path, body, query });
+
+        if (method === "GET" && path === "/customer") return jsonResponse(200, { values: [] });
+        if (method === "GET" && path === "/employee") return jsonResponse(200, { values: [] });
+        if (method === "GET" && path === "/department") return jsonResponse(200, { values: [{ id: 7001 }] });
+        if (method === "GET" && path === "/product") return jsonResponse(200, { values: [] });
+        if (method === "GET" && path === "/order") return jsonResponse(200, { values: [] });
+
+        if (method === "POST" && path === "/customer") {
+          const customerBody = (body ?? {}) as Record<string, unknown>;
+          if (!customerBody.name) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "name", message: "Feltet må fylles ut." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7101 } });
+        }
+
+        if (method === "POST" && path === "/employee") {
+          const employeeBody = (body ?? {}) as Record<string, unknown>;
+          const department = employeeBody.department as Record<string, unknown> | undefined;
+          if (!employeeBody.email || !department?.id) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [
+                { field: "email", message: "Feltet må fylles ut." },
+                { field: "department.id", message: "Feltet må fylles ut." },
+              ],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7201 } });
+        }
+
+        if (method === "POST" && path === "/project") {
+          const projectBody = (body ?? {}) as Record<string, unknown>;
+          const manager = projectBody.projectManager as Record<string, unknown> | undefined;
+          if (!manager?.id) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "projectManager", message: "Kan ikke være null." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7301 } });
+        }
+
+        if (method === "POST" && path === "/product") {
+          const productBody = (body ?? {}) as Record<string, unknown>;
+          if (!productBody.name) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "name", message: "Feltet må fylles ut." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7401 } });
+        }
+
+        if (method === "POST" && path === "/order") {
+          const orderBody = (body ?? {}) as Record<string, unknown>;
+          const lines = orderBody.orderLines as Array<Record<string, unknown>> | undefined;
+          orderHadLines = Array.isArray(lines) && lines.length > 0;
+          if (!orderHadLines) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "orderLines", message: "Må ha minst én ordrelinje." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7501 } });
+        }
+
+        if (method === "POST" && path === "/invoice") {
+          if (!orderHadLines) {
+            return jsonResponse(422, {
+              status: 422,
+              validationMessages: [{ field: "orders", message: "Ordren mangler fakturerbare linjer." }],
+            });
+          }
+          return jsonResponse(201, { value: { id: 7601 } });
+        }
+
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "fixed-price milestone execution",
+          steps: [
+            { method: "GET", path: "/customer", params: { count: 1, fields: "id", organizationNumber: "872682023", name: "Clearwater Ltd" }, saveAs: "customer" },
+            { method: "GET", path: "/employee", params: { count: 1, fields: "id", email: "oliver.brown@example.org", firstName: "Oliver", lastName: "Brown" }, saveAs: "employee" },
+            { method: "POST", path: "/project", body: { name: "Cloud Migration", startDate: "2026-03-19", customer: { id: "{{customer_id}}" }, projectManager: { id: "{{employee_id}}" } }, saveAs: "project" },
+            { method: "GET", path: "/product", params: { count: 1, fields: "id", name: "Milestone 25% Cloud Migration" }, saveAs: "product" },
+            { method: "POST", path: "/order", body: { customer: { id: "{{customer_id}}" }, orderDate: "2026-03-19", deliveryDate: "2026-03-19" }, saveAs: "order" },
+            { method: "POST", path: "/invoice", body: { customer: { id: "{{customer_id}}" }, invoiceDate: "2026-03-19", invoiceDueDate: "2026-03-19", orders: [{ id: "{{order_id}}" }] }, saveAs: "invoice" },
+          ],
+        };
+        await executePlan(client, plan, false);
+
+        const orderPost = calls.find((call) => call.method === "POST" && call.path === "/order");
+        const orderBody = (orderPost?.body ?? {}) as Record<string, unknown>;
+        const lines = orderBody.orderLines as Array<Record<string, unknown>> | undefined;
+        assert(Array.isArray(lines) && lines.length > 0, "order fallback should inject orderLines");
+
+        const employeePost = calls.find((call) => call.method === "POST" && call.path === "/employee");
+        const employeeBody = (employeePost?.body ?? {}) as Record<string, unknown>;
+        assert(employeeBody.email, "employee fallback should include email");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
     name: "executePlan keeps running but surfaces mutating step failures",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -923,6 +1125,32 @@ async function runGates(): Promise<void> {
       assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order in heuristic plan");
       const issues = validatePlanForPrompt("Create order for customer ACME", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
+    },
+  });
+
+  gates.push({
+    name: "heuristic detects fixed-price milestone invoice flow",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt:
+          "Set a fixed price of 202150 NOK on the project \"Cloud Migration\" for Clearwater Ltd (org no. 872682023). The project manager is Oliver Brown (oliver.brown@example.org). Invoice the customer for 25% of the fixed price as a milestone payment.",
+        files: [],
+        tripletex_credentials: {
+          base_url: "https://example.test/v2",
+          session_token: "token",
+        },
+      });
+      assert.equal(plan.steps.length, 6, "expected deterministic 6-step fixed-price milestone flow");
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/project"), "expected POST /project");
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order");
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/invoice"), "expected POST /invoice");
+
+      const orderStep = plan.steps.find((step) => step.method === "POST" && step.path === "/order");
+      const orderBody = (orderStep?.body ?? {}) as Record<string, unknown>;
+      const lines = orderBody.orderLines as Array<Record<string, unknown>> | undefined;
+      assert(Array.isArray(lines) && lines.length > 0, "expected orderLines in milestone flow");
+      const price = Number(lines[0]?.priceExcludingVatCurrency);
+      assert.equal(price, 50537.5, "expected 25% of 202150 as milestone amount");
     },
   });
 

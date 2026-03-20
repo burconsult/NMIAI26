@@ -241,6 +241,58 @@ function extractOrganizationNumber(prompt: string): string | null {
   return nineDigit?.[1] ?? null;
 }
 
+function parseFlexibleNumber(raw: string): number | null {
+  const cleaned = raw.replace(/[^\d,.-]/g, "").trim();
+  if (!cleaned) return null;
+  const commaCount = (cleaned.match(/,/g) ?? []).length;
+  const dotCount = (cleaned.match(/\./g) ?? []).length;
+  let normalized = cleaned;
+  if (commaCount > 0 && dotCount === 0) {
+    normalized = cleaned.replace(",", ".");
+  } else if (commaCount > 0 && dotCount > 0) {
+    const lastComma = cleaned.lastIndexOf(",");
+    const lastDot = cleaned.lastIndexOf(".");
+    normalized =
+      lastComma > lastDot
+        ? cleaned.replace(/\./g, "").replace(",", ".")
+        : cleaned.replace(/,/g, "");
+  } else {
+    normalized = cleaned.replace(/,/g, "");
+  }
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+function extractFixedPriceAmount(prompt: string): number | null {
+  const fixedPriceMatch = prompt.match(
+    /(?:fixed price|fastpris|precio fijo|pre[cç]o fixo|prix fixe|festpreis)[^\d-]*(-?\d[\d\s.,]*)/i,
+  );
+  if (!fixedPriceMatch?.[1]) return null;
+  return parseFlexibleNumber(fixedPriceMatch[1]);
+}
+
+function extractPercentage(prompt: string): number | null {
+  const percentMatch = prompt.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
+  if (!percentMatch?.[1]) return null;
+  return parseFlexibleNumber(percentMatch[1]);
+}
+
+function extractCustomerNameFromPrompt(prompt: string): string | null {
+  const customerMatch = prompt.match(
+    /(?:for|til|para|pour|f[üu]r)\s+([^,(.\n]+?)(?:\s*\((?:org|org\.|organization|organisasjon)[^)]+\)|[.,\n]|$)/i,
+  );
+  const candidate = customerMatch?.[1]?.trim();
+  if (candidate && candidate.length >= 2) return candidate;
+  return null;
+}
+
+function extractProjectManagerName(prompt: string): string | null {
+  const managerMatch = prompt.match(/(?:project manager|prosjektleder|gerente de proyecto)\s*(?:is|er|es|:)?\s+([^,(.\n]+?)(?:\s*\(|[.,\n]|$)/i);
+  const candidate = managerMatch?.[1]?.trim();
+  if (candidate && candidate.length >= 2) return candidate;
+  return null;
+}
+
 function splitPersonName(name: string | null): { firstName: string; lastName: string } {
   if (!name) {
     const suffix = Date.now().toString().slice(-6);
@@ -731,6 +783,106 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   const deleteIntent = isDeleteIntent(lower);
   const updateIntent = isUpdateIntent(lower) && !createIntent && !deleteIntent;
   const readIntent = isReadIntent(lower) && !createIntent && !deleteIntent && !updateIntent;
+
+  const fixedPriceAmount = extractFixedPriceAmount(prompt);
+  const milestonePercent = extractPercentage(prompt);
+  const hasProjectKeywords = lower.includes("project") || lower.includes("prosjekt");
+  const hasMilestoneInvoiceKeywords =
+    lower.includes("invoice") || lower.includes("faktura") || lower.includes("milestone");
+  if (hasProjectKeywords && hasMilestoneInvoiceKeywords && fixedPriceAmount !== null && milestonePercent !== null) {
+    const projectName = quoted ?? `Generated Project ${Date.now().toString().slice(-6)}`;
+    const customerName = extractCustomerNameFromPrompt(prompt) ?? `Generated Customer ${Date.now().toString().slice(-6)}`;
+    const managerName = extractProjectManagerName(prompt) ?? capitalized ?? "Generated Manager";
+    const manager = splitPersonName(managerName);
+    const orgNo = extractOrganizationNumber(prompt);
+    const milestoneAmount = Math.max(0.01, Math.round((fixedPriceAmount * (milestonePercent / 100)) * 100) / 100);
+    const productName = `Milestone ${milestonePercent}% ${projectName}`.slice(0, 120);
+
+    const customerLookupParams: Record<string, unknown> = {
+      count: 1,
+      fields: "id,name,organizationNumber",
+    };
+    if (orgNo) customerLookupParams.organizationNumber = orgNo;
+    if (customerName) customerLookupParams.name = customerName;
+
+    const employeeLookupParams: Record<string, unknown> = {
+      count: 1,
+      fields: "id,firstName,lastName,email",
+      firstName: manager.firstName,
+      lastName: manager.lastName,
+    };
+    if (email) employeeLookupParams.email = email;
+
+    return {
+      summary: "Heuristic fixed-price project milestone invoice flow",
+      steps: [
+        {
+          method: "GET",
+          path: "/customer",
+          params: customerLookupParams,
+          saveAs: "customer",
+          reason: "Find customer by org number/name (or create via template hydration fallback)",
+        },
+        {
+          method: "GET",
+          path: "/employee",
+          params: employeeLookupParams,
+          saveAs: "employee",
+          reason: "Find project manager by email/name (or create via template hydration fallback)",
+        },
+        {
+          method: "POST",
+          path: "/project",
+          body: {
+            name: projectName,
+            startDate: todayIsoDate(),
+            customer: { id: "{{customer_id}}" },
+            projectManager: { id: "{{employee_id}}" },
+          },
+          saveAs: "project",
+          reason: "Create the fixed-price project scaffold",
+        },
+        {
+          method: "GET",
+          path: "/product",
+          params: { count: 1, fields: "id,name", name: productName },
+          saveAs: "product",
+          reason: "Find/create milestone product for billing line",
+        },
+        {
+          method: "POST",
+          path: "/order",
+          body: {
+            customer: { id: "{{customer_id}}" },
+            orderDate: todayIsoDate(),
+            deliveryDate: todayIsoDate(),
+            orderLines: [
+              {
+                product: { id: "{{product_id}}" },
+                count: 1,
+                priceExcludingVatCurrency: milestoneAmount,
+                description: `Milestone ${milestonePercent}% of fixed price`,
+              },
+            ],
+          },
+          saveAs: "order",
+          reason: "Create milestone order with explicit amount",
+        },
+        {
+          method: "POST",
+          path: "/invoice",
+          body: {
+            customer: { id: "{{customer_id}}" },
+            invoiceDate: todayIsoDate(),
+            invoiceDueDate: todayIsoDate(),
+            orders: [{ id: "{{order_id}}" }],
+          },
+          saveAs: "invoice",
+          reason: "Invoice the milestone order",
+        },
+      ],
+    };
+  }
 
   if (readIntent && (lower.includes("employee") || lower.includes("ansatt"))) {
     return {
@@ -1717,6 +1869,27 @@ function firstIdFromVars(vars: Record<string, unknown>, candidates: string[]): u
   return undefined;
 }
 
+function firstNonEmptyString(...values: Array<unknown>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function firstNumberFromVars(vars: Record<string, unknown>, candidates: string[]): number | undefined {
+  for (const candidate of candidates) {
+    const direct = resolveVar(vars, candidate);
+    if (typeof direct === "number" && Number.isFinite(direct)) return direct;
+    if (typeof direct === "string") {
+      const parsed = parseFlexibleNumber(direct);
+      if (parsed !== null) return parsed;
+    }
+  }
+  return undefined;
+}
+
 function generatedEntityName(path: string): string {
   const entity = endpointContractFromPath(path)?.entity ?? "entity";
   const readable = entity.replace("ledger_", "ledger ").replace("travelExpense", "travel expense");
@@ -1779,6 +1952,8 @@ function withPreflightBodyDefaults(
   const employeeId = firstIdFromVars(vars, ["employee_id", "employeeId", "employee", "projectManager_id"]);
   const orderId = firstIdFromVars(vars, ["order_id", "orderId", "order"]);
   const departmentId = firstIdFromVars(vars, ["department_id", "departmentId", "department"]);
+  const productId = firstIdFromVars(vars, ["product_id", "productId", "product"]);
+  const amountHint = firstNumberFromVars(vars, ["milestone_amount", "invoice_amount", "amount"]);
 
   if (normalizedPath === "/project") {
     setIfMissing("name", generatedEntityName(path));
@@ -1798,6 +1973,16 @@ function withPreflightBodyDefaults(
       next.customer = { id: customerId };
       changed = true;
     }
+    if ((!Array.isArray(next.orderLines) || next.orderLines.length === 0) && hasValue(productId)) {
+      next.orderLines = [
+        {
+          product: { id: productId },
+          count: 1,
+          priceExcludingVatCurrency: amountHint ?? 1,
+        },
+      ];
+      changed = true;
+    }
   } else if (normalizedPath === "/invoice") {
     setIfMissing("invoiceDate", todayIsoDate());
     setIfMissing("invoiceDueDate", todayIsoDate());
@@ -1805,7 +1990,7 @@ function withPreflightBodyDefaults(
       next.customer = { id: customerId };
       changed = true;
     }
-    if (!Array.isArray(next.orders) && hasValue(orderId)) {
+    if ((!Array.isArray(next.orders) || next.orders.length === 0) && hasValue(orderId)) {
       next.orders = [{ id: orderId }];
       changed = true;
     }
@@ -2158,12 +2343,18 @@ async function fetchOrCreateCustomerId(
   } catch {
     // Ignore and try create fallback.
   }
+  const nameHint = firstNonEmptyString(lookup.name, lookup.customerName);
+  const orgNoHint = firstNonEmptyString(lookup.organizationNumber, lookup.orgNumber, lookup.orgnr);
+  const emailHint = firstNonEmptyString(lookup.email);
   try {
+    const createBody: Record<string, unknown> = {
+      name: nameHint || generatedEntityName("/customer"),
+      isCustomer: true,
+    };
+    if (emailHint) createBody.email = emailHint;
+    if (orgNoHint) createBody.organizationNumber = orgNoHint;
     const created = await client.request("POST", "/customer", {
-      body: {
-        name: generatedEntityName("/customer"),
-        isCustomer: true,
-      },
+      body: createBody,
     });
     const id = extractIdFromVarValue(primaryValue(created));
     if (hasValue(id)) {
@@ -2196,12 +2387,17 @@ async function fetchOrCreateEmployeeId(
     // Ignore and try create fallback.
   }
   const departmentId = await fetchOrCreateDepartmentId(client, vars, true);
+  const firstNameHint = firstNonEmptyString(lookup.firstName);
+  const lastNameHint = firstNonEmptyString(lookup.lastName);
+  const emailHint = firstNonEmptyString(lookup.email);
+  const fallbackPerson = splitPersonName(firstNonEmptyString(lookup.name, lookup.fullName, lookup.employeeName) ?? null);
   try {
     const createBody: Record<string, unknown> = {
-      firstName: "Generated",
-      lastName: `Employee${Date.now().toString().slice(-6)}`,
+      firstName: firstNameHint || fallbackPerson.firstName,
+      lastName: lastNameHint || fallbackPerson.lastName,
       userType: defaultEmployeeUserType(),
     };
+    if (emailHint) createBody.email = emailHint;
     if (hasValue(departmentId)) {
       createBody.department = { id: departmentId };
     }
@@ -2241,13 +2437,25 @@ async function fetchOrCreateOrderId(
 
   const customerId = await fetchOrCreateCustomerId(client, vars);
   if (!hasValue(customerId)) return undefined;
+  const productId = await fetchOrCreateProductId(client, vars, true);
+  const amountHint = firstNumberFromVars(vars, ["milestone_amount", "invoice_amount", "amount"]);
   try {
+    const createBody: Record<string, unknown> = {
+      customer: { id: customerId },
+      orderDate: todayIsoDate(),
+      deliveryDate: todayIsoDate(),
+    };
+    if (hasValue(productId)) {
+      createBody.orderLines = [
+        {
+          product: { id: productId },
+          count: 1,
+          priceExcludingVatCurrency: amountHint ?? 1,
+        },
+      ];
+    }
     const created = await client.request("POST", "/order", {
-      body: {
-        customer: { id: customerId },
-        orderDate: todayIsoDate(),
-        deliveryDate: todayIsoDate(),
-      },
+      body: createBody,
     });
     const id = extractIdFromVarValue(primaryValue(created));
     if (hasValue(id)) {
@@ -2285,6 +2493,11 @@ async function enrichVarsForValidationRetry(
     normalizedPath === "/project" ||
     normalizedPath === "/travelExpense";
   const needsOrder = roots.has("order") || roots.has("orderId") || roots.has("orders") || normalizedPath === "/invoice";
+  const needsProduct =
+    roots.has("product") ||
+    roots.has("productId") ||
+    roots.has("orderLines") ||
+    normalizedPath === "/order";
   const needsDepartment =
     roots.has("department") ||
     roots.has("departmentId") ||
@@ -2294,6 +2507,7 @@ async function enrichVarsForValidationRetry(
   if (needsCustomer) await fetchOrCreateCustomerId(client, vars);
   if (needsEmployee) await fetchOrCreateEmployeeId(client, vars);
   if (needsOrder) await fetchOrCreateOrderId(client, vars);
+  if (needsProduct) await fetchOrCreateProductId(client, vars, true);
   if (needsDepartment) await fetchOrCreateDepartmentId(client, vars, true);
 }
 
@@ -2313,6 +2527,11 @@ function withValidationFieldDefaults(
   const departmentId = firstIdFromVars(vars, ["department_id", "departmentId", "department"]);
   const projectId = firstIdFromVars(vars, ["project_id", "projectId", "project"]);
   const orderId = firstIdFromVars(vars, ["order_id", "orderId", "order"]);
+  const productId = firstIdFromVars(vars, ["product_id", "productId", "product"]);
+  const amountHint = firstNumberFromVars(vars, ["milestone_amount", "invoice_amount", "amount"]);
+  const employeeLookup = aliasLookupParams(vars, "employee");
+  const generatedEmail = `generated.${Date.now().toString().slice(-6)}@example.org`;
+  const defaultEmployeeEmail = firstNonEmptyString(employeeLookup.email, employeeLookup.mail, employeeLookup.ePost) ?? generatedEmail;
 
   const setIfMissing = (key: string, value: unknown): void => {
     if (!hasValue(value) || hasValue(next[key])) return;
@@ -2341,6 +2560,11 @@ function withValidationFieldDefaults(
         break;
       case "isCustomer":
         setIfMissing("isCustomer", true);
+        break;
+      case "email":
+        if (normalizedPath === "/employee") {
+          setIfMissing("email", defaultEmployeeEmail);
+        }
         break;
       case "customer":
         if (hasValue(customerId)) setIfMissing("customer", { id: customerId });
@@ -2382,8 +2606,20 @@ function withValidationFieldDefaults(
         setIfMissing("orderId", orderId);
         break;
       case "orders":
-        if (!Array.isArray(next.orders) && hasValue(orderId)) {
+        if ((!Array.isArray(next.orders) || next.orders.length === 0) && hasValue(orderId)) {
           next.orders = [{ id: orderId }];
+          changed = true;
+        }
+        break;
+      case "orderLines":
+        if ((!Array.isArray(next.orderLines) || next.orderLines.length === 0) && hasValue(productId)) {
+          next.orderLines = [
+            {
+              product: { id: productId },
+              count: 1,
+              priceExcludingVatCurrency: amountHint ?? 1,
+            },
+          ];
           changed = true;
         }
         break;
@@ -2402,9 +2638,21 @@ function withValidationFieldDefaults(
   }
   if (normalizedPath === "/order") {
     setIfMissing("orderDate", todayIsoDate());
+    setIfMissing("deliveryDate", todayIsoDate());
+    if ((!Array.isArray(next.orderLines) || next.orderLines.length === 0) && hasValue(productId)) {
+      next.orderLines = [
+        {
+          product: { id: productId },
+          count: 1,
+          priceExcludingVatCurrency: amountHint ?? 1,
+        },
+      ];
+      changed = true;
+    }
   }
   if (normalizedPath === "/employee") {
     setIfMissing("userType", defaultEmployeeUserType());
+    setIfMissing("email", defaultEmployeeEmail);
     if (hasValue(departmentId)) setIfMissing("department", { id: departmentId });
   }
 
@@ -2451,6 +2699,12 @@ export async function executePlan(
         toRecord(rawParams),
       );
       if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
+      if (!dryRun && step.method === "POST" && normalizePath(path) === "/order") {
+        const orderDraft = toRecord(body);
+        if (!Array.isArray(orderDraft.orderLines) || orderDraft.orderLines.length === 0) {
+          await fetchOrCreateProductId(client, vars, true);
+        }
+      }
       const preflightDefaults = withPreflightBodyDefaults(step.method, path, body, vars);
       if (preflightDefaults.changed) body = preflightDefaults.body;
       trace?.({
@@ -2488,13 +2742,24 @@ export async function executePlan(
             break;
           } catch (error) {
             const retryFields = validationFieldsFromError(error);
+            let forcedRetry = false;
+            if (retryFields.length === 0) {
+              const normalizedPath = normalizePath(path);
+              if (step.method === "POST" && normalizedPath === "/invoice") {
+                retryFields.push("orders", "customer", "invoiceDate", "invoiceDueDate");
+                forcedRetry = true;
+              } else if (step.method === "POST" && normalizedPath === "/employee") {
+                retryFields.push("email", "department", "userType");
+                forcedRetry = true;
+              }
+            }
             const mappingFields = unknownMappingFieldsFromError(error);
             if (retryFields.length > 0) {
               await enrichVarsForValidationRetry(client, vars, path, retryFields);
             }
             const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
             const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
-            const shouldRetry = sanitized.changed || repaired.changed;
+            const shouldRetry = forcedRetry || sanitized.changed || repaired.changed;
             if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
             if (validationRetryRounds >= maxValidationRetries) throw error;
             validationRetryRounds += 1;
