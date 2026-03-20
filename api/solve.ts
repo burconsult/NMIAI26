@@ -199,6 +199,12 @@ function isMutatingExecutionFailure(error: unknown): boolean {
   return error instanceof SolveError && error.message.startsWith("Plan execution failed on mutating steps:");
 }
 
+function isBlockingPlanIssue(issue: string): boolean {
+  const normalized = issue.toLowerCase();
+  if (normalized.includes("repeated identical mutating steps")) return false;
+  return true;
+}
+
 function validateApiKey(req: VercelRequest): boolean {
   const expected = process.env.TRIPLETEX_API_KEY?.trim();
   if (!expected) return true;
@@ -325,12 +331,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
               tracePlanner(traceEvents, runId, event),
             );
             const planIssues = validatePlanForPrompt(payload.prompt, plan);
+            const blockingIssues = planIssues.filter((issue) => isBlockingPlanIssue(issue));
+            if (blockingIssues.length > 0) {
+              tracePlanner(traceEvents, runId, {
+                event: "plan_validation_failed",
+                error: blockingIssues.join(" | "),
+              });
+              throw new SolveError(`Plan validation failed: ${blockingIssues.join(" | ")}`);
+            }
             if (planIssues.length > 0) {
               tracePlanner(traceEvents, runId, {
                 event: "plan_validation_failed",
-                error: planIssues.join(" | "),
+                error: `non-blocking issues: ${planIssues.join(" | ")}`,
               });
-              throw new SolveError(`Plan validation failed: ${planIssues.join(" | ")}`);
             }
             tracePlanner(traceEvents, runId, {
               event: "plan_validation_passed",

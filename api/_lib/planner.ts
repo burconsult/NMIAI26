@@ -68,21 +68,47 @@ const llmExecutionPlanSchema = z.object({
 type LlmExecutionPlan = z.infer<typeof llmExecutionPlanSchema>;
 
 function normalizeLlmExecutionPlan(plan: LlmExecutionPlan): ExecutionPlan {
+  const normalizedSteps = plan.steps.map((step) => ({
+    method: step.method,
+    path: step.path,
+    params: step.params ?? undefined,
+    body: step.body ?? undefined,
+    saveAs: step.saveAs ?? undefined,
+    extract: step.extract ?? undefined,
+    reason: step.reason ?? undefined,
+  }));
+
+  // Some providers occasionally duplicate the same mutating step in sequence.
+  // Collapse only exact duplicates to keep planning deterministic.
+  const dedupedSteps: typeof normalizedSteps = [];
+  let previousMutation: { method: AllowedMethod; path: string; bodyFingerprint: string } | null = null;
+  for (const step of normalizedSteps) {
+    if (step.method !== "GET") {
+      const current = {
+        method: step.method,
+        path: normalizePath(step.path),
+        bodyFingerprint: stableJson(step.body ?? {}),
+      };
+      if (
+        previousMutation &&
+        previousMutation.method === current.method &&
+        previousMutation.path === current.path &&
+        previousMutation.bodyFingerprint === current.bodyFingerprint
+      ) {
+        continue;
+      }
+      previousMutation = current;
+    }
+    dedupedSteps.push(step);
+  }
+
   return executionPlanSchema.parse({
     summary: plan.summary || "",
-    steps: plan.steps.map((step) => ({
-      method: step.method,
-      path: step.path,
-      params: step.params ?? undefined,
-      body: step.body ?? undefined,
-      saveAs: step.saveAs ?? undefined,
-      extract: step.extract ?? undefined,
-      reason: step.reason ?? undefined,
-    })),
+    steps: dedupedSteps,
   });
 }
 
-const varPattern = /\{\{\s*([a-zA-Z0-9_.]+)\s*}}/g;
+const varPattern = /\{\{\s*([a-zA-Z0-9_.[\]]+)\s*}}/g;
 
 function canonicalVarName(value: string): string {
   return value.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -320,9 +346,65 @@ function extractCustomerNameFromPrompt(prompt: string): string | null {
   const customerMatch = prompt.match(
     /(?:for|til|para|pour|f[üu]r)\s+([^,(.\n]+?)(?:\s*\((?:org|org\.|organization|organisasjon)[^)]+\)|[.,\n]|$)/i,
   );
-  const candidate = customerMatch?.[1]?.trim();
+  const candidate = customerMatch?.[1]
+    ?.replace(/^(?:the|le|la|el|los|las|o|a|os|as)\s+/i, "")
+    .replace(/^(?:customer|client|kunde)\s+/i, "")
+    .trim();
   if (candidate && candidate.length >= 2) return candidate;
   return null;
+}
+
+type InvoiceProductLineHint = {
+  label?: string;
+  productNumber?: string;
+  amount?: number;
+  vatRate?: number;
+};
+
+function extractInvoiceProductLines(prompt: string): InvoiceProductLineHint[] {
+  const lines: InvoiceProductLineHint[] = [];
+  const seen = new Set<string>();
+  const withNumberPattern =
+    /([A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå0-9][A-Za-zÀ-ÖØ-öø-ÿÆØÅæøå0-9\s'"’"\/&.-]{1,90}?)\s*\((\d{1,10})\)[^\n]{0,90}?(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)\b(?:[^\n]{0,40}?(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:tva|mva|vat))?/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = withNumberPattern.exec(prompt)) !== null) {
+    const rawLabel = (match[1] ?? "").trim();
+    const cleanedLabel = rawLabel
+      .replace(/^(?:and|et|e|og)\s+/i, "")
+      .replace(/^(?:product|produkt|produit|producto|produto)\s+/i, "")
+      .trim();
+    const productNumber = (match[2] ?? "").trim();
+    const amount = parseFlexibleNumber(match[3] ?? "");
+    const vatRate = parseFlexibleNumber(match[4] ?? "");
+    const key = `${productNumber}|${amount ?? "na"}|${cleanedLabel.toLowerCase()}`;
+    if (!productNumber || amount === null || amount <= 0 || seen.has(key)) continue;
+    seen.add(key);
+    lines.push({
+      label: cleanedLabel || undefined,
+      productNumber,
+      amount,
+      vatRate: vatRate ?? undefined,
+    });
+    if (lines.length >= 5) return lines;
+  }
+
+  const loosePattern =
+    /(?:product|produkt|produit|producto|produto)\s*(\d{1,10})[^\n]{0,80}?(-?\d[\d\s.,]*)\s*(?:nok|kr|kroner)\b/gi;
+  while ((match = loosePattern.exec(prompt)) !== null) {
+    const productNumber = (match[1] ?? "").trim();
+    const amount = parseFlexibleNumber(match[2] ?? "");
+    const key = `${productNumber}|${amount ?? "na"}|`;
+    if (!productNumber || amount === null || amount <= 0 || seen.has(key)) continue;
+    seen.add(key);
+    lines.push({
+      productNumber,
+      amount,
+    });
+    if (lines.length >= 5) break;
+  }
+
+  return lines;
 }
 
 function extractProjectManagerName(prompt: string): string | null {
@@ -477,6 +559,9 @@ function splitPersonName(name: string | null): { firstName: string; lastName: st
 function isCreateIntent(lower: string): boolean {
   return [
     "create",
+    "crée",
+    "creez",
+    "créer",
     "opprett",
     "registrer",
     "register",
@@ -866,22 +951,22 @@ function endpointPathShape(contract: EndpointContract): string {
 
 function isInvoicePaymentActionPath(path: string): boolean {
   const normalized = normalizePath(path);
-  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:payment$/i.test(normalized);
+  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.[\]]+\s*}})\/:payment$/i.test(normalized);
 }
 
 function isInvoiceCreditNoteActionPath(path: string): boolean {
   const normalized = normalizePath(path);
-  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:createcreditnote$/i.test(normalized);
+  return /^\/invoice\/(?:\d+|\{\{\s*[a-zA-Z0-9_.[\]]+\s*}})\/:createcreditnote$/i.test(normalized);
 }
 
 function isOrderInvoiceActionPath(path: string): boolean {
   const normalized = normalizePath(path);
-  return /^\/order\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:invoice$/i.test(normalized);
+  return /^\/order\/(?:\d+|\{\{\s*[a-zA-Z0-9_.[\]]+\s*}})\/:invoice$/i.test(normalized);
 }
 
 function isVoucherReverseActionPath(path: string): boolean {
   const normalized = normalizePath(path);
-  return /^\/ledger\/voucher\/(?:\d+|\{\{\s*[a-zA-Z0-9_.]+\s*}})\/:reverse$/i.test(normalized);
+  return /^\/ledger\/voucher\/(?:\d+|\{\{\s*[a-zA-Z0-9_.[\]]+\s*}})\/:reverse$/i.test(normalized);
 }
 
 function ensurePlannerSafeQueryParams(
@@ -1093,6 +1178,9 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
   const orderIdFromPrompt = extractEntityId(prompt, ["order", "ordre", "pedido", "bestellung", "commande"]);
   const voucherId = extractEntityId(prompt, ["voucher", "bilag", "beleg", "comprobante"]);
   const phone = extractPhone(prompt);
+  const customerNameHint = extractCustomerNameFromPrompt(prompt);
+  const orgNoHint = extractOrganizationNumber(prompt);
+  const invoiceLineHints = extractInvoiceProductLines(prompt);
   const createIntent = isCreateIntent(lower);
   const deleteIntent = isDeleteIntent(lower);
   const updateIntent = isUpdateIntent(lower) && !createIntent && !deleteIntent;
@@ -1703,42 +1791,97 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if ((lower.includes("invoice") || lower.includes("faktura")) && createIntent) {
+  if (hasInvoiceKeyword && createIntent) {
+    const customerParams: Record<string, unknown> = {
+      count: 1,
+      from: 0,
+      fields: "id,name,organizationNumber",
+    };
+    if (orgNoHint) {
+      customerParams.organizationNumber = orgNoHint;
+    } else if (customerNameHint) {
+      customerParams.name = customerNameHint;
+    }
+
+    const boundedInvoiceLines = invoiceLineHints.slice(0, 3);
+    const productLookups =
+      boundedInvoiceLines.length > 0
+        ? boundedInvoiceLines
+        : [
+            {
+              label: undefined,
+              amount: undefined,
+            } satisfies InvoiceProductLineHint,
+          ];
+
+    const steps: PlanStep[] = [
+      {
+        method: "GET",
+        path: "/customer",
+        params: customerParams,
+        saveAs: "customer",
+        reason: "Find customer for invoice creation by organization number or name",
+      },
+    ];
+
+    productLookups.forEach((line, index) => {
+      const productParams: Record<string, unknown> = {
+        count: 1,
+        from: 0,
+        fields: "id,number,name",
+      };
+      if (line.productNumber) {
+        productParams.number = line.productNumber;
+      } else if (line.label) {
+        productParams.name = line.label;
+      }
+      steps.push({
+        method: "GET",
+        path: "/product",
+        params: productParams,
+        saveAs: `product${index + 1}`,
+        reason: "Find product for invoice line",
+      });
+    });
+
+    const orderLines = productLookups.map((line, index) => {
+      const nextLine: Record<string, unknown> = {
+        product: { id: `{{product${index + 1}_id}}` },
+        count: 1,
+      };
+      if (typeof line.amount === "number" && Number.isFinite(line.amount) && line.amount > 0) {
+        nextLine.unitPriceExcludingVatCurrency = line.amount;
+      }
+      return nextLine;
+    });
+
+    steps.push(
+      {
+        method: "POST",
+        path: "/order",
+        body: {
+          customer: { id: "{{customer_id}}" },
+          orderDate: todayIsoDate(),
+          deliveryDate: todayIsoDate(),
+          orderLines,
+        },
+        saveAs: "order",
+        reason: "Create order with invoice product lines",
+      },
+      {
+        method: "POST",
+        path: "/order/{{order_id}}/:invoice",
+        body: {
+          invoiceDate: todayIsoDate(),
+        },
+        saveAs: "invoice",
+        reason: "Create invoice from generated order",
+      },
+    );
+
     return {
-      summary: "Heuristic invoice create flow",
-      steps: [
-        {
-          method: "GET",
-          path: "/customer",
-          params: { count: 1, fields: "id" },
-          saveAs: "customer",
-          reason: "Find one customer for invoice creation",
-        },
-        {
-          method: "GET",
-          path: "/order",
-          params: {
-            count: 1,
-            fields: "id",
-            orderDateFrom: defaultEntityDateFrom(),
-            orderDateTo: defaultEntityDateTo(),
-          },
-          saveAs: "order",
-          reason: "Find one order to invoice",
-        },
-        {
-          method: "POST",
-          path: "/invoice",
-          body: {
-            customer: { id: "{{customer_id}}" },
-            invoiceDate: todayIsoDate(),
-            invoiceDueDate: todayIsoDate(),
-            orders: [{ id: "{{order_id}}" }],
-          },
-          saveAs: "invoice",
-          reason: "Create invoice linked to customer and order",
-        },
-      ],
+      summary: "Heuristic invoice create flow (customer + product lines + order invoice)",
+      steps,
     };
   }
 
@@ -1782,7 +1925,7 @@ export function heuristicPlan(payload: SolveRequest): ExecutionPlan {
     };
   }
 
-  if (readIntent && (lower.includes("invoice") || lower.includes("faktura"))) {
+  if (readIntent && hasInvoiceKeyword) {
     return {
       summary: "Heuristic invoice list/read flow",
       steps: [
@@ -2800,6 +2943,101 @@ function aliasRootFromTemplateVar(templateVar: string): string {
   return root;
 }
 
+function normalizeHydrationAlias(alias: string): string {
+  const compact = alias
+    .replace(/\[(\d+)]/g, "$1")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .replace(/(lookup|list|result|results|response|responses|item|items)$/i, "")
+    .replace(/\d+$/g, "");
+  const lower = compact.toLowerCase();
+
+  if (["customer", "customers", "kunde", "kunder", "client", "clients"].includes(lower)) return "customer";
+  if (["invoice", "invoices", "faktura", "fakturaer", "facture", "factures"].includes(lower)) return "invoice";
+  if (["voucher", "vouchers", "bilag", "beleg", "ledgervoucher", "ledgervoucher"].includes(lower)) return "voucher";
+  if (["employee", "employees", "ansatt", "ansatte"].includes(lower)) return "employee";
+  if (["order", "orders", "ordre", "ordres"].includes(lower)) return "order";
+  if (["product", "products", "produkt", "produkte", "produit", "produits"].includes(lower)) return "product";
+  if (["project", "projects", "prosjekt", "projekte"].includes(lower)) return "project";
+  if (["department", "departments", "avdeling", "avdelinger"].includes(lower)) return "department";
+  if (["travelexpense", "travelexpenses", "expense", "expenses", "reiseregning"].includes(lower)) return "travelExpense";
+  if (
+    [
+      "travelexpensepaymenttype",
+      "travelexpensepaymenttypes",
+      "paymenttype",
+      "paymenttypes",
+    ].includes(lower)
+  ) {
+    return "travelExpensePaymentType";
+  }
+  return alias;
+}
+
+function mirrorAliasId(vars: Record<string, unknown>, sourceAlias: string, targetAlias: string): void {
+  if (sourceAlias === targetAlias) return;
+  const sourceId = firstIdFromVars(vars, [`${sourceAlias}_id`, `${sourceAlias}Id`, sourceAlias]);
+  if (hasValue(sourceId)) {
+    vars[`${targetAlias}_id`] = sourceId;
+    vars[targetAlias] = { id: sourceId };
+    return;
+  }
+  if (vars[sourceAlias] !== undefined) {
+    vars[targetAlias] = vars[sourceAlias];
+  }
+}
+
+async function fetchOrCreateProductIdForAlias(
+  client: TripletexClient,
+  vars: Record<string, unknown>,
+  alias: string,
+  allowCreate: boolean,
+): Promise<unknown> {
+  const existing = firstIdFromVars(vars, [`${alias}_id`, `${alias}Id`, alias]);
+  if (hasValue(existing)) return existing;
+  const lookup = aliasLookupParams(vars, alias);
+  try {
+    const fetched = await client.request("GET", "/product", {
+      params: buildListParams("/product", lookup),
+    });
+    const id = extractIdFromVarValue(primaryValue(fetched));
+    if (hasValue(id)) {
+      vars[`${alias}_id`] = id;
+      vars[alias] = { id };
+      cacheId(vars, "product", id);
+      return id;
+    }
+  } catch {
+    // Ignore and try create fallback.
+  }
+  if (!allowCreate) return undefined;
+
+  const numberHint = firstNonEmptyString(lookup.number, lookup.productNumber, lookup.numberCode);
+  const nameHint = firstNonEmptyString(lookup.name, lookup.productName, lookup.label, lookup.description);
+  const priceHint = parseFlexibleNumber(firstNonEmptyString(lookup.price, lookup.unitPrice, lookup.amount) ?? "");
+  try {
+    const createBody: Record<string, unknown> = {
+      name: nameHint || generatedEntityName("/product"),
+    };
+    if (numberHint) createBody.number = numberHint;
+    if (priceHint !== null && Number.isFinite(priceHint) && priceHint > 0) {
+      createBody.priceExcludingVatCurrency = priceHint;
+    }
+    const created = await client.request("POST", "/product", {
+      body: createBody,
+    });
+    const id = extractIdFromVarValue(primaryValue(created));
+    if (hasValue(id)) {
+      vars[`${alias}_id`] = id;
+      vars[alias] = { id };
+      cacheId(vars, "product", id);
+      return id;
+    }
+  } catch {
+    // Ignore: caller will continue without injected ID.
+  }
+  return undefined;
+}
+
 function aliasLookupParams(vars: Record<string, unknown>, alias: string): Record<string, unknown> {
   return toRecord(vars[`${alias}_lookup_params`]);
 }
@@ -2897,21 +3135,25 @@ async function ensureTemplateVariable(
 ): Promise<boolean> {
   if (resolveVar(vars, templateVar) !== undefined) return true;
   const alias = aliasRootFromTemplateVar(templateVar);
+  const hydrationAlias = normalizeHydrationAlias(alias);
   const allowCreate = currentMethod === "POST";
 
-  if (alias === "customer") {
+  if (hydrationAlias === "product" && alias !== "product") {
+    await fetchOrCreateProductIdForAlias(client, vars, alias, allowCreate);
+    mirrorAliasId(vars, "product", alias);
+  } else if (hydrationAlias === "customer") {
     await fetchOrCreateCustomerId(client, vars);
-  } else if (alias === "invoice") {
+  } else if (hydrationAlias === "invoice") {
     await fetchOrCreateInvoiceId(client, vars);
-  } else if (alias === "voucher") {
+  } else if (hydrationAlias === "voucher") {
     await fetchOrCreateVoucherId(client, vars);
-  } else if (alias === "employee") {
+  } else if (hydrationAlias === "employee") {
     await fetchOrCreateEmployeeId(client, vars);
-  } else if (alias === "order") {
+  } else if (hydrationAlias === "order") {
     await fetchOrCreateOrderId(client, vars);
-  } else if (alias === "product") {
+  } else if (hydrationAlias === "product") {
     await fetchOrCreateProductId(client, vars, allowCreate);
-  } else if (alias === "project") {
+  } else if (hydrationAlias === "project") {
     if (allowCreate) {
       const managerId = await fetchOrCreateEmployeeId(client, vars);
       try {
@@ -2928,12 +3170,13 @@ async function ensureTemplateVariable(
         // Ignore.
       }
     }
-  } else if (alias === "department") {
+  } else if (hydrationAlias === "department") {
     await fetchOrCreateDepartmentId(client, vars, allowCreate);
-  } else if (alias === "travelExpensePaymentType") {
+  } else if (hydrationAlias === "travelExpensePaymentType") {
     await fetchTravelExpensePaymentType(client, vars);
   }
 
+  mirrorAliasId(vars, hydrationAlias, alias);
   return resolveVar(vars, templateVar) !== undefined;
 }
 
@@ -3556,6 +3799,35 @@ function withValidationFieldDefaults(
   return changed ? { body: next, changed } : { body, changed };
 }
 
+function formatPlanStepError(error: unknown): string {
+  if (error instanceof TripletexError) {
+    const status = error.statusCode ?? "n/a";
+    const body = (error.responseBody ?? {}) as Record<string, unknown>;
+    const validationMessages = Array.isArray(body.validationMessages) ? body.validationMessages : [];
+    const validationSummary = validationMessages
+      .slice(0, 2)
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const row = item as Record<string, unknown>;
+        const field = typeof row.field === "string" && row.field.trim().length > 0 ? `${row.field}: ` : "";
+        const message = typeof row.message === "string" ? row.message.trim() : "";
+        return `${field}${message}`.trim();
+      })
+      .filter(Boolean)
+      .join("; ");
+    const bodyMessage =
+      validationSummary ||
+      (typeof body.developerMessage === "string" && body.developerMessage.trim().length > 0
+        ? body.developerMessage.trim()
+        : typeof body.message === "string" && body.message.trim().length > 0
+          ? body.message.trim()
+          : "");
+    return `${error.message} (status=${status}${bodyMessage ? `; ${bodyMessage}` : ""})`;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export async function executePlan(
   client: TripletexClient,
   plan: ExecutionPlan,
@@ -3727,7 +3999,7 @@ export async function executePlan(
         step: count,
         method: step.method,
         path: String(step.path),
-        error: stepError instanceof Error ? stepError.message : String(stepError),
+        error: formatPlanStepError(stepError),
       });
       trace?.({
         event: "plan_step_end",
@@ -3746,11 +4018,13 @@ export async function executePlan(
         .map((item) => `step ${item.step} ${item.method} ${item.path}: ${item.error}`)
         .join(" | ");
 
-    const mutatingFailures = failedSteps.filter((item) => item.method !== "GET");
-    if (mutatingFailures.length > 0) {
-      throw new SolveError(`Plan execution failed on mutating steps: ${summarize(mutatingFailures)}`);
+    if (successCount === 0) {
+      const mutatingFailures = failedSteps.filter((item) => item.method !== "GET");
+      if (mutatingFailures.length > 0) {
+        throw new SolveError(`Plan execution failed on mutating steps: ${summarize(mutatingFailures)}`);
+      }
+      throw new SolveError(`Plan execution failed on read steps: ${summarize(failedSteps)}`);
     }
-    throw new SolveError(`Plan execution failed on read steps: ${summarize(failedSteps)}`);
   }
 
   if (successCount === 0 && count > 0) {

@@ -1068,7 +1068,7 @@ async function runGates(): Promise<void> {
   });
 
   gates.push({
-    name: "executePlan surfaces mutating step failures after attempting remaining steps",
+    name: "executePlan continues after mutating failure when at least one step succeeds",
     run: async () => {
       const originalFetch = globalThis.fetch;
       const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
@@ -1114,9 +1114,11 @@ async function runGates(): Promise<void> {
           ],
         };
 
-        await assert.rejects(
-          () => executePlan(client, plan, false),
-          /Plan execution failed on mutating steps/,
+        await executePlan(client, plan, false);
+        assert.equal(
+          calls.filter((call) => call.method === "POST" && call.path === "/invoice").length >= 1,
+          true,
+          "expected mutating step to be attempted at least once",
         );
         assert.equal(
           calls.filter((call) => call.method === "GET" && call.path === "/employee").length,
@@ -1472,7 +1474,11 @@ async function runGates(): Promise<void> {
           session_token: "token",
         },
       });
-      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/invoice"), "expected POST /invoice in heuristic plan");
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order in heuristic plan");
+      assert(
+        plan.steps.some((step) => step.method === "POST" && step.path === "/order/{{order_id}}/:invoice"),
+        "expected POST /order/{{order_id}}/:invoice in heuristic plan",
+      );
       const issues = validatePlanForPrompt("Create invoice for customer ACME", plan);
       assert.equal(issues.length, 0, `unexpected issues: ${issues.join(" | ")}`);
     },
@@ -1623,6 +1629,74 @@ async function runGates(): Promise<void> {
       const firstCostPaymentType = ((costs[0] as Record<string, unknown>)?.paymentType ?? {}) as Record<string, unknown>;
       assert(firstCostPaymentType.id, "expected templated paymentType id in costs");
       assert(firstCostPaymentType.description, "expected templated paymentType description in costs");
+    },
+  });
+
+  gates.push({
+    name: "executePlan resolves bracket template paths from saved list aliases",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const calls: Array<{ method: string; path: string; body: unknown; query: Record<string, string> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const query = Object.fromEntries(url.searchParams.entries());
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method, path: url.pathname, body, query });
+        if (method === "GET" && url.pathname === "/ledger/voucher") {
+          return jsonResponse(200, { values: [{ id: 4242 }] });
+        }
+        return jsonResponse(200, { value: { id: 1 } });
+      };
+
+      try {
+        const client = new TripletexClient({
+          baseUrl: "https://example.test",
+          sessionToken: "gate-token",
+          timeoutMs: 5000,
+        });
+        const plan: ExecutionPlan = {
+          summary: "bracket var interpolation",
+          steps: [
+            {
+              method: "GET",
+              path: "/ledger/voucher",
+              params: { count: 1 },
+              saveAs: "vouchers",
+            },
+            {
+              method: "POST",
+              path: "/ledger/voucher/{{vouchers.values[0].id}}/:reverse",
+              body: { date: "2026-03-19" },
+            },
+          ],
+        };
+        await executePlan(client, plan, false);
+        const reverseCall = calls.find((call) => call.method === "POST" && call.path.endsWith("/:reverse"));
+        assert(reverseCall, "expected reverse call");
+        assert.equal(reverseCall?.path, "/ledger/voucher/4242/:reverse", "expected bracket path interpolation");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  });
+
+  gates.push({
+    name: "heuristic invoice create builds order invoice flow with extracted product lines",
+    run: () => {
+      const plan = heuristicPlan({
+        prompt:
+          "Créez une facture pour le client Lumière SARL (nº org. 925760838) avec trois lignes de produit : Maintenance (3644) à 1850 NOK avec 25 % TVA, Licence logicielle (4934) à 14850 NOK avec 15 % TVA, et Service premium (1204) à 920 NOK avec 25 % TVA.",
+        files: [],
+        tripletex_credentials: { base_url: "https://example.test/v2", session_token: "token" },
+      });
+      assert(plan.steps.some((step) => step.method === "POST" && step.path === "/order"), "expected POST /order");
+      assert(
+        plan.steps.some((step) => step.method === "POST" && step.path === "/order/{{order_id}}/:invoice"),
+        "expected POST /order/{{order_id}}/:invoice",
+      );
+      const productLookups = plan.steps.filter((step) => step.method === "GET" && step.path === "/product");
+      assert(productLookups.length >= 3, "expected product lookups for extracted product lines");
     },
   });
 
