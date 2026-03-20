@@ -1390,6 +1390,8 @@ function buildGenericCreatePlan(
 }
 
 function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): string {
+  const defaultOpenAIModel = "openai/gpt-5.4";
+  const defaultGeminiModel = "google/gemini-3.1-pro-preview";
   const lower = prompt.toLowerCase();
   const hasDocAttachment = summaries.some(
     (item) =>
@@ -1409,15 +1411,15 @@ function selectPlanningModel(prompt: string, summaries: AttachmentSummary[]): st
   ].some((token) => lower.includes(token));
 
   if (hasDocAttachment && complexAccountingTask) {
-    return process.env.TRIPLETEX_MODEL_DOC_COMPLEX?.trim() || "openai/gpt-5.2";
+    return process.env.TRIPLETEX_MODEL_DOC_COMPLEX?.trim() || defaultOpenAIModel;
   }
   if (hasDocAttachment) {
-    return process.env.TRIPLETEX_MODEL_DOC_FAST?.trim() || "google/gemini-2.5-flash";
+    return process.env.TRIPLETEX_MODEL_DOC_FAST?.trim() || defaultGeminiModel;
   }
   if (complexAccountingTask) {
-    return process.env.TRIPLETEX_MODEL_REASONING?.trim() || "anthropic/claude-sonnet-4.5";
+    return process.env.TRIPLETEX_MODEL_REASONING?.trim() || defaultOpenAIModel;
   }
-  return process.env.TRIPLETEX_MODEL_DEFAULT?.trim() || "openai/gpt-5.2";
+  return process.env.TRIPLETEX_MODEL_DEFAULT?.trim() || defaultOpenAIModel;
 }
 
 function parseFallbackModels(primaryModel: string): string[] {
@@ -1426,9 +1428,11 @@ function parseFallbackModels(primaryModel: string): string[] {
       .map((part) => part.trim())
       .filter(Boolean) ?? [];
   const defaults = [
+    "google/gemini-3.1-pro-preview",
+    "openai/gpt-5.4",
+    "openai/gpt-5.4-pro",
     "anthropic/claude-sonnet-4.5",
     "google/gemini-2.5-pro",
-    "openai/gpt-5-nano",
   ];
   return [...configured, ...defaults].filter((model, index, all) => model !== primaryModel && all.indexOf(model) === index);
 }
@@ -1559,7 +1563,7 @@ export async function llmPlan(
       apiKey: process.env.OPENAI_API_KEY?.trim(),
       baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
     });
-    const directModel = process.env.TRIPLETEX_DIRECT_OPENAI_MODEL?.trim() || "gpt-4.1-mini";
+    const directModel = process.env.TRIPLETEX_DIRECT_OPENAI_MODEL?.trim() || "gpt-5.4";
     trace?.({
       event: "llm_plan_direct_openai_fallback",
       model: modelName,
