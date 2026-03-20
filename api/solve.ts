@@ -257,6 +257,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const payload = parsed.data;
     appendTrace(traceEvents, runId, "solve.validation_passed", {
+      prompt: payload.prompt.slice(0, 500),
       promptLength: payload.prompt.length,
       fileCount: payload.files.length,
       baseUrlHost: new URL(payload.tripletex_credentials.base_url).host,
@@ -346,8 +347,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     } catch (error) {
       const debug = process.env.TRIPLETEX_DEBUG_ERRORS === "1";
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const promptPreview = payload.prompt.slice(0, 300);
       console.error("Tripletex solve error", {
         runId,
+        prompt: promptPreview,
         planner: usedPlanner,
         error: errorMessage,
         llmAttemptErrors,
@@ -362,6 +365,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             : undefined,
       });
       appendTrace(traceEvents, runId, "solve.failed", {
+        prompt: promptPreview,
         planner: usedPlanner,
         error: errorMessage,
         failHard,

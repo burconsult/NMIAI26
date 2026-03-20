@@ -2178,129 +2178,146 @@ export async function executePlan(
 ): Promise<number> {
   const vars: Record<string, unknown> = {};
   let count = 0;
+  let successCount = 0;
+  let lastError: unknown = null;
 
   for (const rawStep of plan.steps) {
     const step = rawStep as PlanStep;
     count += 1;
-    let path: unknown;
-    let rawParams: unknown;
-    let body: unknown;
-    let repairedTemplateRounds = 0;
-    while (true) {
-      try {
-        path = interpolateValue(step.path, vars);
-        rawParams = interpolateValue(step.params ?? {}, vars);
-        body = interpolateValue(step.body, vars);
-        break;
-      } catch (error) {
-        const missing = missingTemplateVarFromError(error);
-        if (missing === null) throw error;
-        if (repairedTemplateRounds >= 6) throw error;
-        const repaired = await ensureTemplateVariable(client, vars, missing, step.method);
-        if (!repaired) throw error;
-        repairedTemplateRounds += 1;
-      }
-    }
-    const params = ensurePlannerSafeQueryParams(
-      step.method,
-      typeof path === "string" ? path : String(path),
-      toRecord(rawParams),
-    );
-    if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
-    const preflightDefaults = withPreflightBodyDefaults(step.method, path, body, vars);
-    if (preflightDefaults.changed) body = preflightDefaults.body;
-    trace?.({
-      event: "plan_step_start",
-      step: count,
-      method: step.method,
-      path,
-      dryRun: dryRun && step.method !== "GET",
-    });
-
-    let response: unknown;
-    if (dryRun && step.method !== "GET") {
-      response = { value: { id: count, dryRun: true } };
-    } else {
-      try {
-        response = await client.request(step.method, path, {
-          params: (params ?? {}) as Record<string, unknown>,
-          body,
-        });
-      } catch (error) {
-        const retryFields = validationFieldsFromError(error);
-        const mappingFields = unknownMappingFieldsFromError(error);
-        if (retryFields.length > 0) {
-          await enrichVarsForValidationRetry(client, vars, path, retryFields);
+    try {
+      let path: unknown;
+      let rawParams: unknown;
+      let body: unknown;
+      let repairedTemplateRounds = 0;
+      while (true) {
+        try {
+          path = interpolateValue(step.path, vars);
+          rawParams = interpolateValue(step.params ?? {}, vars);
+          body = interpolateValue(step.body, vars);
+          break;
+        } catch (error) {
+          const missing = missingTemplateVarFromError(error);
+          if (missing === null) throw error;
+          if (repairedTemplateRounds >= 6) throw error;
+          const repaired = await ensureTemplateVariable(client, vars, missing, step.method);
+          if (!repaired) throw error;
+          repairedTemplateRounds += 1;
         }
-        const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
-        const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
-        const shouldRetry = sanitized.changed || repaired.changed;
-        if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
-        trace?.({
-          event: "plan_step_retry_on_validation",
-          step: count,
-          method: step.method,
-          path,
-          retryFields,
-          removedFields: sanitized.removedFields,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        body = repaired.body;
-        response = await client.request(step.method, path, {
-          params: (params ?? {}) as Record<string, unknown>,
-          body,
-        });
-        trace?.({
-          event: "plan_step_retry_success",
-          step: count,
-          method: step.method,
-          path,
-          retryFields,
-          removedFields: sanitized.removedFields,
-        });
       }
-    }
-    trace?.({
-      event: "plan_step_end",
-      step: count,
-      method: step.method,
-      path,
-      responseShape: summarizeResponseShape(response),
-    });
+      const params = ensurePlannerSafeQueryParams(
+        step.method,
+        typeof path === "string" ? path : String(path),
+        toRecord(rawParams),
+      );
+      if (typeof path !== "string") throw new SolveError("Resolved path must be a string.");
+      const preflightDefaults = withPreflightBodyDefaults(step.method, path, body, vars);
+      if (preflightDefaults.changed) body = preflightDefaults.body;
+      trace?.({
+        event: "plan_step_start",
+        step: count,
+        method: step.method,
+        path,
+        dryRun: dryRun && step.method !== "GET",
+      });
 
-    const primary = primaryValue(response);
-    if (step.saveAs) {
-      vars[step.saveAs] = primary;
-      if (step.method === "GET") {
-        vars[`${step.saveAs}_lookup_path`] = path;
-        vars[`${step.saveAs}_lookup_params`] = { ...(params ?? {}) };
+      let response: unknown;
+      if (dryRun && step.method !== "GET") {
+        response = { value: { id: count, dryRun: true } };
+      } else {
+        try {
+          response = await client.request(step.method, path, {
+            params: (params ?? {}) as Record<string, unknown>,
+            body,
+          });
+        } catch (error) {
+          const retryFields = validationFieldsFromError(error);
+          const mappingFields = unknownMappingFieldsFromError(error);
+          if (retryFields.length > 0) {
+            await enrichVarsForValidationRetry(client, vars, path, retryFields);
+          }
+          const sanitized = withUnknownFieldRemovals(step.method, body, mappingFields);
+          const repaired = withValidationFieldDefaults(step.method, path, sanitized.body, vars, retryFields);
+          const shouldRetry = sanitized.changed || repaired.changed;
+          if (!shouldRetry || (retryFields.length === 0 && mappingFields.length === 0)) throw error;
+          trace?.({
+            event: "plan_step_retry_on_validation",
+            step: count,
+            method: step.method,
+            path,
+            retryFields,
+            removedFields: sanitized.removedFields,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          body = repaired.body;
+          response = await client.request(step.method, path, {
+            params: (params ?? {}) as Record<string, unknown>,
+            body,
+          });
+          trace?.({
+            event: "plan_step_retry_success",
+            step: count,
+            method: step.method,
+            path,
+            retryFields,
+            removedFields: sanitized.removedFields,
+          });
+        }
       }
       trace?.({
-        event: "plan_step_var_saved",
+        event: "plan_step_end",
         step: count,
-        saveAs: step.saveAs,
+        method: step.method,
+        path,
+        responseShape: summarizeResponseShape(response),
       });
-      if (primary && typeof primary === "object" && (primary as Record<string, unknown>).id !== undefined) {
-        vars[`${step.saveAs}_id`] = (primary as Record<string, unknown>).id;
+      successCount += 1;
+
+      const primary = primaryValue(response);
+      if (step.saveAs) {
+        vars[step.saveAs] = primary;
+        if (step.method === "GET") {
+          vars[`${step.saveAs}_lookup_path`] = path;
+          vars[`${step.saveAs}_lookup_params`] = { ...(params ?? {}) };
+        }
         trace?.({
           event: "plan_step_var_saved",
           step: count,
-          saveAs: `${step.saveAs}_id`,
+          saveAs: step.saveAs,
         });
+        if (primary && typeof primary === "object" && (primary as Record<string, unknown>).id !== undefined) {
+          vars[`${step.saveAs}_id`] = (primary as Record<string, unknown>).id;
+          trace?.({
+            event: "plan_step_var_saved",
+            step: count,
+            saveAs: `${step.saveAs}_id`,
+          });
+        }
       }
-    }
-    for (const [name, sourcePath] of Object.entries(step.extract ?? {}) as Array<[string, string]>) {
-      const extracted = dig(response, sourcePath);
-      if (extracted !== undefined) {
-        vars[name] = extracted;
-        trace?.({
-          event: "plan_step_var_extracted",
-          step: count,
-          extractKey: name,
-        });
+      for (const [name, sourcePath] of Object.entries(step.extract ?? {}) as Array<[string, string]>) {
+        const extracted = dig(response, sourcePath);
+        if (extracted !== undefined) {
+          vars[name] = extracted;
+          trace?.({
+            event: "plan_step_var_extracted",
+            step: count,
+            extractKey: name,
+          });
+        }
       }
+    } catch (stepError) {
+      lastError = stepError;
+      trace?.({
+        event: "plan_step_end",
+        step: count,
+        method: step.method,
+        path: step.path,
+        error: stepError instanceof Error ? stepError.message : String(stepError),
+      });
     }
   }
 
+  if (successCount === 0 && lastError) {
+    throw lastError;
+  }
   return count;
 }
