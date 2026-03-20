@@ -170,7 +170,7 @@ function resolveVarRoot(vars: Record<string, unknown>, name: string): unknown {
 }
 
 function resolveVar(vars: Record<string, unknown>, expr: string): unknown {
-  const normalized = expr.startsWith("vars.") ? expr.slice(5) : expr;
+  const normalized = (expr.startsWith("vars.") ? expr.slice(5) : expr).replace(/\[(\d+)\]/g, ".$1");
   if (!normalized.includes(".")) return resolveVarRoot(vars, normalized);
   const [root, ...rest] = normalized.split(".");
   const base = resolveVarRoot(vars, root);
@@ -783,7 +783,7 @@ function toRecord(value: unknown): Record<string, unknown> {
 }
 
 function isIdPathSegment(segment: string): boolean {
-  return /^\d+$/.test(segment) || /^\{\{\s*[a-zA-Z0-9_.]+\s*}}$/.test(segment);
+  return /^\d+$/.test(segment) || /^\{\{\s*[a-zA-Z0-9_.[\]]+\s*}}$/.test(segment);
 }
 
 function actionEndpointMatchesPath(path: string, contract: EndpointContract): boolean {
