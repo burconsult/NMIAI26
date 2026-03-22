@@ -1,0 +1,29 @@
+{
+  "created_utc": "2026-03-21T21:35:29.376509+00:00",
+  "run_name": "ngd_y11x_1280_e220_l4g4_opt_s42",
+  "run_dir": "/content/nmiai_ngd/runs/ngd_y11x_1280_e220_l4g4_opt_s42",
+  "bundle_dir": "/content/drive/MyDrive/NMIAI26/ngd/audit/ngd_y11x_1280_e220_l4g4_opt_s42_20260321_213527",
+  "git_commit": null,
+  "host": "Linux-6.6.113+-x86_64-with-glibc2.35",
+  "python": "3.12.12",
+  "script": "/content/nmiai_ngd/scripts/archive_training_run.py",
+  "dataset": {
+    "path": "/content/nmiai_ngd/data/raw/NM_NGD_coco_dataset.zip",
+    "size_bytes": 895637428,
+    "sha256": "7790aa183b15e1f50a19e7cdfacce4adf808a78f4039b626fc3c7c2af458a5f8"
+  },
+  "onnx_path": "/content/nmiai_ngd/runs/ngd_y11x_1280_e220_l4g4_opt_s42/weights/best_1024.onnx",
+  "note": "optimized colab pipeline run",
+  "copied_files": [
+    "args.yaml",
+    "confusion_matrix.png",
+    "confusion_matrix_normalized.png",
+    "labels.jpg",
+    "model.onnx",
+    "requirements.lock.txt",
+    "results.csv",
+    "results.png",
+    "weights/best.pt",
+    "weights/last.pt"
+  ]
+}

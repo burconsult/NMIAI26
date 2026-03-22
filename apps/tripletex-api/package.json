@@ -1,0 +1,38 @@
+{
+  "name": "nmiai26-tripletex-vercel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "acceptance:gates": "npx tsx tools/tripletex_acceptance_gates.ts",
+    "mock:tripletex": "npx tsx tools/mock_tripletex_server.ts",
+    "smoke:tripletex": "npx tsx tools/tripletex_mock_smoke.ts",
+    "canary:tripletex": "npx tsx tools/tripletex_live_canary.ts",
+    "harness:tripletex:reminder": "npx tsx tools/tripletex_seeded_reminder_harness.ts",
+    "harness:tripletex:month-end": "npx tsx tools/tripletex_seeded_month_end_harness.ts",
+    "harness:tripletex:bank": "npx tsx tools/tripletex_seeded_bank_harness.ts",
+    "sandbox:probe": "npx tsx tools/tripletex_sandbox_probe.ts",
+    "sandbox:entitlements": "npx tsx tools/tripletex_sandbox_entitlement_matrix.ts",
+    "logs:tripletex-runtime": "bash tools/tripletex_vercel_logs.sh",
+    "report:tripletex-runs": "npx tsx tools/tripletex_run_report.ts",
+    "matrix:tripletex": "npx tsx tools/tripletex_scenario_matrix_report.ts",
+    "feedback:tripletex": "npx tsx tools/tripletex_feedback_loop.ts",
+    "ainm:tripletex:list": "npx tsx tools/tripletex_ainm_submissions.ts",
+    "ainm:tripletex:submit": "npx tsx tools/tripletex_ainm_submit.ts",
+    "ainm:tripletex:batch": "npx tsx tools/tripletex_ainm_submit_batch.ts",
+    "ainm:tripletex:cycle": "npx tsx tools/tripletex_ainm_cycle.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "^3.0.66",
+    "@ai-sdk/openai": "^2.0.40",
+    "@google-cloud/documentai": "^9.6.0",
+    "ai": "^6.0.116",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@vercel/node": "^5.0.4",
+    "typescript": "^5.8.2"
+  }
+}

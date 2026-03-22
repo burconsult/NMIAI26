@@ -1,0 +1,28 @@
+[project]
+name = "nmiai26-grocery-bot"
+version = "0.1.0"
+description = "Grocery Bot stack for the Norwegian AI Championship 2026."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.116,<1",
+    "uvicorn>=0.35,<1",
+    "websockets>=15,<16",
+    "requests>=2.31,<3",
+    "numpy>=1.26,<3",
+]
+
+[project.scripts]
+nmiai-bot = "nmiai_bot.main:main"
+nmiai-web = "nmiai_bot.web:main"
+nmiai-local = "nmiai_bot.local_api:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nmiai_bot"]

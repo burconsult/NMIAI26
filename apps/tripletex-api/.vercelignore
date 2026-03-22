@@ -1,0 +1,14 @@
+.git/
+docs/
+examples/
+tools/
+local/
+reports/
+runs/
+README.md
+.env
+.env.local
+.env*.local
+*.pyc
+*.pt
+*.zip

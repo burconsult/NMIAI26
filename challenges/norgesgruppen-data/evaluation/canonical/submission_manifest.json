@@ -1,0 +1,15 @@
+{
+  "score": 0.8766,
+  "selected_submission_zip": "evaluation/canonical/submission_ngd_y11x_1280_e220_s42_conf022_i056_t1800_m300.zip",
+  "source_variant_zip": "evaluation/threshold_sweep/submissions/submission_v4_c022_i056_t1800_m300.zip",
+  "base_submission_zip": "evaluation/threshold_sweep/submissions/submission_baseline_c022_i058_t1600_m260.zip",
+  "audit_zip": "evaluation/audit/ngd_y11x_1280_e220_l4g4_opt_s42_20260321_213527.zip",
+  "selection_report": "evaluation/threshold_sweep/reports/proxy_eval_20260322_4candidates.json",
+  "inference_profile": {
+    "conf": 0.022,
+    "iou": 0.56,
+    "topk": 1800,
+    "max_det": 300
+  },
+  "selected_submission_sha256": "40c10a5d6a56eb3174a0fae0854f1fbc370dcb93ccae0f5cc65e2423232858d4"
+}

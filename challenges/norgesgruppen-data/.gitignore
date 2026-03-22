@@ -1,0 +1,29 @@
+# Local runtime and artifacts (not for GitHub)
+artifacts/
+data/raw/*
+!data/raw/README.md
+data/processed/
+data/proxy_eval/yolo_dataset/
+data/proxy_eval/tmp/
+runs/
+yolo_dataset/
+submissions/best/artifacts_local/
+submissions/best/evaluation_record/
+evaluation/**/evaluation_record/**/extracted/
+evaluation/gcp/
+
+# Python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Large model artifacts
+*.pt
+*.onnx
+*.onnx.data
+*.zip
+!evaluation/canonical/model.onnx
+!evaluation/canonical/best.pt
+
+# macOS
+.DS_Store

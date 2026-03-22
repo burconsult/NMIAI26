@@ -1,9 +1,0 @@
-{
-  "prompt": "Create customer Acme AS with email post@acme.no",
-  "files": [],
-  "tripletex_credentials": {
-    "base_url": "https://your-sandbox.tripletex.dev/v2",
-    "session_token": "replace-with-token"
-  }
-}
-
