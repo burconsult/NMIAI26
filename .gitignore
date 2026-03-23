@@ -9,6 +9,7 @@ __pycache__/
 node_modules/
 .vercel/
 archive/
+output/*.png
 
 apps/tripletex-api/local/
 apps/tripletex-api/reports/

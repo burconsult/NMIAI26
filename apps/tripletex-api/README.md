@@ -4,8 +4,10 @@ This application is Burconsult's Tripletex challenge submission for NMiAI 2026. 
 
 The deployment surface is intentionally narrow:
 
+- `GET /`
 - `POST /solve`
 - `GET /health`
+- `GET /dashboard`
 
 ## Layout
 
@@ -26,6 +28,12 @@ Health check:
 
 ```bash
 curl http://127.0.0.1:3000/health
+```
+
+Competition homepage/dashboard:
+
+```bash
+open http://127.0.0.1:3000
 ```
 
 Example request:

@@ -1,0 +1,13 @@
+.git/
+.cursor/
+.venv/
+.pytest_cache/
+.DS_Store
+.env
+.env.local
+.env*.local
+archive/
+challenges/
+tracks/
+output/
+node_modules/
