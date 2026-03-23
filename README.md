@@ -11,6 +11,10 @@ This repository contains Burconsult's competition submission for NMiAI 2026. It 
 
 Only `apps/tripletex-api/` is deployed on Vercel. The challenge workspaces remain source-first and evaluator-facing.
 
+## License
+
+This repository is released under the MIT License. See `LICENSE`.
+
 ## Evaluator Guide
 
 ### Tripletex

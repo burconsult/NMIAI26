@@ -29,4 +29,5 @@ challenges/norgesgruppen-data/data/proxy_eval/
 challenges/norgesgruppen-data/runs/
 challenges/norgesgruppen-data/yolo_dataset/
 challenges/norgesgruppen-data/evaluation/**/*.zip
+challenges/norgesgruppen-data/evaluation/threshold_sweep/
 challenges/norgesgruppen-data/evaluation/gcp/

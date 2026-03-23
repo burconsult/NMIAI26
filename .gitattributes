@@ -1,0 +1,2 @@
+challenges/norgesgruppen-data/evaluation/canonical/model.onnx filter=lfs diff=lfs merge=lfs -text
+challenges/norgesgruppen-data/evaluation/canonical/best.pt filter=lfs diff=lfs merge=lfs -text

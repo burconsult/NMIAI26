@@ -15,9 +15,8 @@ Examples:
 
 Use ordered, purpose-driven names and keep a single active notebook path in Git:
 
-- Active: `06_colab_l4_g4_reproducible_pipeline.ipynb`
-- Stable fallback: `05_colab_l4_g4_optimized_pipeline.ipynb`
-- Historical reference notebooks: `notebooks/archive/`
+- Active: `05_colab_l4_g4_optimized_pipeline.ipynb`
+- Keep superseded notebooks out of the curated repository unless they are needed for evaluator review.
 
 ## Submission Artifact Names
 
@@ -38,5 +37,6 @@ Inference export size variants should be reflected in the name:
 ## Git Hygiene
 
 - Keep only code/docs/notebooks in Git.
-- Keep data/models/zips in ignored paths (`evaluation`, `data/raw`, `artifacts`).
+- Keep datasets, transient training outputs, and generated submission zips in ignored paths (`data/raw`, `artifacts`, `evaluation/**/*.zip`).
+- The only large checked-in binaries should be the canonical evaluator artifacts in `evaluation/canonical/`.
 - Prefer small smoke inputs for tests (`data/samples/smoke`).

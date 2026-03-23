@@ -2,6 +2,7 @@
   "name": "nmiai26-tripletex-vercel",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

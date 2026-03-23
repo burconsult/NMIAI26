@@ -3,6 +3,7 @@ name = "nmiai26-grocery-bot"
 version = "0.1.0"
 description = "Grocery Bot stack for the Norwegian AI Championship 2026."
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.116,<1",
