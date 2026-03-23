@@ -1,14 +1,9 @@
-.git/
-docs/
-examples/
-tools/
-local/
-reports/
-runs/
-README.md
-.env
-.env.local
-.env*.local
-*.pyc
-*.pt
-*.zip
+# Allowlist only the runtime files Vercel needs for the Tripletex API.
+/*
+!.vercelignore
+!api
+!api/**
+!package.json
+!package-lock.json
+!tsconfig.json
+!vercel.json
